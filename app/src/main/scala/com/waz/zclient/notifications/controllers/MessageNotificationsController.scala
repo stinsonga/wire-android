@@ -51,8 +51,6 @@ import com.waz.ZLog.verbose
 import com.waz.api.NotificationsHandler.NotificationType
 import com.waz.api.NotificationsHandler.NotificationType._
 import com.waz.bitmap
-import com.waz.content.UserPreferences
-import com.waz.media.manager.context.IntensityLevel
 import com.waz.model.NotId
 import com.waz.service.ZMessaging
 import com.waz.service.push.NotificationService.NotificationInfo
@@ -60,6 +58,7 @@ import com.waz.threading.Threading
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.zclient._
 import com.waz.zclient.controllers.userpreferences.UserPreferencesController
+import com.waz.zclient.media.SoundController
 import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.IntentUtils._
 import com.waz.zclient.utils.RingtoneUtils
@@ -74,6 +73,7 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
   def context = cxt
 
   val zms = inject[Signal[ZMessaging]]
+  lazy val soundController = inject[SoundController]
 
   val notServices = (Option(ZMessaging.currentAccounts) match {
     case Some(ac) => ac.zmsInstances
@@ -99,19 +99,6 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
   lazy val clearIntent = NotificationsAndroidService.clearNotificationsIntent(context)
 
   val displayedNots = Signal(Seq.empty[NotId])
-
-  val tonePrefs = for {
-    zms <- zms
-    ringTone <- zms.userPrefs.preference(UserPreferences.RingTone).signal
-    textTone <- zms.userPrefs.preference(UserPreferences.TextTone).signal
-    pingTone <- zms.userPrefs.preference(UserPreferences.PingTone).signal
-  } yield (ringTone, textTone, pingTone)
-  private var _tonePrefs: (String, String, String) = (null, null, null)
-  tonePrefs{ _tonePrefs = _ }
-
-  val soundPref = zms.flatMap(_.userPrefs.preference(UserPreferences.Sounds).signal)
-  private var _soundPref = IntensityLevel.NONE
-  soundPref{ _soundPref = _ }
 
   notServices.zip(displayedNots) {
     case (ss, displayed) => ss.foreach(_.markAsDisplayed(displayed))
@@ -158,8 +145,8 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
 
   private def attachNotificationSound(notification: Notification, ns: Seq[NotificationInfo], silent: Boolean) = {
     notification.sound =
-      if (IntensityLevel.NONE == _soundPref || silent) null
-      else if ((IntensityLevel.SOME == _soundPref) && ns.size > 1) null
+      if (soundController.soundIntensityNone || silent) null
+      else if (!soundController.soundIntensityFull && ns.size > 1) null
       else ns.lastOption.fold(null.asInstanceOf[Uri])(getMessageSoundUri)
   }
 
@@ -175,14 +162,14 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
            CONNECT_REQUEST |
            RENAME |
            LIKE =>
-        val value = _tonePrefs._2
+        val value = soundController.tonePrefs._2
         if (value != null && value.isEmpty) {
           null
         } else {
           getSelectedSoundUri(value, R.raw.new_message_gcm)
         }
       case KNOCK =>
-        val value = _tonePrefs._3
+        val value = soundController.tonePrefs._3
         if (value != null && value.isEmpty) {
           null
         } else {
@@ -198,6 +185,9 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
     if (!TextUtils.isEmpty(value) && !RingtoneUtils.isDefaultValue(context, value, preferenceDefault)) Uri.parse(value)
     else RingtoneUtils.getUriForRawId(context, returnDefault)
   }
+
+  private def vibrationEnabled =
+    sharedPreferences.getBoolean(context.getString(R.string.pref_options_vibration_key), true) && soundController.vibrationEnabled
 
   private def getEphemeralNotification(size: Int, silent: Boolean, displayTime: Instant): Notification = {
     val details = getString(R.string.notification__message__ephemeral_details)
@@ -221,16 +211,12 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
 
+    if (!silent && vibrationEnabled) builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
 
-    if (context.getSharedPreferences(UserPreferencesController.USER_PREFS_TAG, Context.MODE_PRIVATE)
-      .getBoolean(context.getString(R.string.pref_options_vibration_key), true) && !silent) {
-      builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
-    }
     builder.build
   }
 
   private def getSingleMessageNotification(n: NotificationInfo, silent: Boolean): Notification = {
-
     val spannableString = getMessage(n, multiple = false, singleConversationInBatch = true, singleUserInBatch = true)
     val title = getMessageTitle(n)
 
@@ -260,10 +246,8 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
         .addAction(R.drawable.ic_action_reply, getString(R.string.notification__action__reply), getNotificationReplyIntent(cxt, n.convId.str, requestBase + 2))
     }
 
-    if (context.getSharedPreferences(UserPreferencesController.USER_PREFS_TAG, Context.MODE_PRIVATE)
-      .getBoolean(context.getString(R.string.pref_options_vibration_key), true) && !silent) {
-      builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
-    }
+    if (!silent && vibrationEnabled) builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
+
     builder.build
   }
 
@@ -296,10 +280,8 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
 
-    if (context.getSharedPreferences(UserPreferencesController.USER_PREFS_TAG, Context.MODE_PRIVATE)
-      .getBoolean(context.getString(R.string.pref_options_vibration_key), true) && !silent) {
-      builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
-    }
+    if (!silent && vibrationEnabled) builder.setVibrate(getIntArray(R.array.new_message_gcm).map(_.toLong))
+
     if (isSingleConv) {
       val requestBase = System.currentTimeMillis.toInt
       val conversationId = convIds.head.str

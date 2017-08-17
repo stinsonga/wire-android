@@ -50,24 +50,32 @@ class SoundController(implicit inj: Injector, cxt: Context) extends Injectable {
   private var _mediaManager = Option.empty[MediaManager]
   mediaManager(_mediaManager = _)
 
-  val tonePrefs = for {
+  val tonePrefsSignal = for {
     zms <- zms
     ringTone <- zms.userPrefs.preference(UserPreferences.RingTone).signal
     textTone <- zms.userPrefs.preference(UserPreferences.TextTone).signal
     pingTone <- zms.userPrefs.preference(UserPreferences.PingTone).signal
   } yield (ringTone, textTone, pingTone)
 
-  tonePrefs {
+  tonePrefsSignal {
     case (ring, text, ping) => setCustomSoundUrisFromPreferences(ring, text, ping)
     case _ =>
   }
 
-  val vibrationEnabled = zms.flatMap(_.userPrefs.preference(UserPreferences.VibrateEnabled).signal)
-  var _vibrationEnabled = false
-  vibrationEnabled { _vibrationEnabled = _ }
+  private var _tonePrefs: (String, String, String) = (null, null, null)
+  tonePrefsSignal { _tonePrefs = _ }
 
-  private def soundIntensityNone = soundIntensity.currentValue.contains(IntensityLevel.NONE)
-  private def soundIntensityFull = soundIntensity.currentValue.isEmpty || soundIntensity.currentValue.contains(IntensityLevel.FULL)
+  def tonePrefs = _tonePrefs
+
+  val vibrationEnabledSignal = zms.flatMap(_.userPrefs.preference(UserPreferences.VibrateEnabled).signal)
+
+  private var _vibrationEnabled = false
+  vibrationEnabledSignal { _vibrationEnabled = _ }
+
+  def vibrationEnabled = _vibrationEnabled
+
+  def soundIntensityNone = soundIntensity.currentValue.contains(IntensityLevel.NONE)
+  def soundIntensityFull = soundIntensity.currentValue.isEmpty || soundIntensity.currentValue.contains(IntensityLevel.FULL)
 
   def setIncomingRingTonePlaying(play: Boolean) = {
     if (!soundIntensityNone) setMediaPlaying(R.raw.ringing_from_them, play)
