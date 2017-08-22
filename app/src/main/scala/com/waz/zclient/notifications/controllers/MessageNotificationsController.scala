@@ -162,14 +162,14 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
            CONNECT_REQUEST |
            RENAME |
            LIKE =>
-        val value = soundController.tonePrefs._2
+        val value = soundController.currentTonePrefs._2
         if (value != null && value.isEmpty) {
           null
         } else {
           getSelectedSoundUri(value, R.raw.new_message_gcm)
         }
       case KNOCK =>
-        val value = soundController.tonePrefs._3
+        val value = soundController.currentTonePrefs._3
         if (value != null && value.isEmpty) {
           null
         } else {
@@ -186,8 +186,7 @@ class MessageNotificationsController(implicit inj: Injector, cxt: Context, event
     else RingtoneUtils.getUriForRawId(context, returnDefault)
   }
 
-  private def vibrationEnabled =
-    sharedPreferences.getBoolean(context.getString(R.string.pref_options_vibration_key), true) && soundController.vibrationEnabled
+  private def vibrationEnabled = soundController.isVibrationEnabled
 
   private def getEphemeralNotification(size: Int, silent: Boolean, displayTime: Instant): Notification = {
     val details = getString(R.string.notification__message__ephemeral_details)
