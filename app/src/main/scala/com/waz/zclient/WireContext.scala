@@ -21,15 +21,15 @@ import android.annotation.SuppressLint
 import android.app.{Dialog, Service}
 import android.content.res.Resources
 import android.content.{Context, ContextWrapper, DialogInterface}
-import android.os.{Build, Bundle}
-import android.support.annotation.IdRes
-import android.support.v4.app.{Fragment, FragmentActivity, FragmentManager}
-import android.support.v7.app.AppCompatActivity
-import android.support.v7.preference.Preference
+import android.os.Bundle
 import android.view.View.OnClickListener
 import android.view.animation.{AlphaAnimation, Animation, AnimationUtils}
 import android.view.{LayoutInflater, View, ViewGroup, ViewStub}
 import android.widget.TextView
+import androidx.annotation.IdRes
+import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.{Fragment, FragmentActivity, FragmentManager}
+import androidx.preference.Preference
 import com.waz.log.BasicLogging.LogTag
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.utils.events._
@@ -399,8 +399,7 @@ trait CallingBannerActivity extends ActivityHelper {
     super.onCreate(savedInstanceState)
 
     callController.isCallActiveDelay.onUi { est =>
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-        getWindow.setStatusBarColor(ContextUtils.getColor(if (est) R.color.accent_green else android.R.color.transparent)(this))
+      getWindow.setStatusBarColor(ContextUtils.getColor(if (est) R.color.accent_green else android.R.color.transparent)(this))
       callBanner.setVisibility(if (est) View.VISIBLE else View.GONE)
     }
 

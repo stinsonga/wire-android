@@ -18,13 +18,13 @@
 package com.waz.zclient.connect
 
 import android.content.Context
-import android.support.v7.widget.RecyclerView
+import androidx.recyclerview.widget.RecyclerView
 import android.view.{View, ViewGroup}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.UserId
 import com.waz.service.ZMessaging
 import com.waz.utils.events.{EventContext, Signal}
-import com.waz.zclient.conversationlist.ConversationListAdapter.Incoming
+import com.waz.zclient.conversationlist.ConversationListController.Incoming
 import com.waz.zclient.utils.RichView
 import com.waz.zclient.{Injectable, Injector}
 

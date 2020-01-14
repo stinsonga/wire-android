@@ -17,40 +17,44 @@
  */
 package com.waz.zclient.conversation
 
+import java.net.URI
+
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
 import com.waz.api
-import com.waz.api.{AssetForUpload, IConversation, Verification}
-import com.waz.content._
+import com.waz.api.{IConversation, Verification}
+import com.waz.content.{ConversationStorage, MembersStorage, OtrClientsStorage, UsersStorage}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.ConversationData.ConversationType
 import com.waz.model._
 import com.waz.model.otr.Client
-import com.waz.service.AccountManager
-import com.waz.service.assets.AssetService
-import com.waz.service.assets.AssetService.RawAssetInput.UriInput
+import com.waz.service.assets2.{Content, ContentForUpload, UriHelper}
 import com.waz.service.conversation.{ConversationsService, ConversationsUiService, SelectedConversationService}
+import com.waz.service.AccountManager
 import com.waz.threading.{CancellableFuture, SerialDispatchQueue, Threading}
 import com.waz.utils.events.{EventContext, EventStream, Signal, SourceStream}
-import com.waz.utils.wrappers.URI
 import com.waz.utils.{Serialized, returning, _}
+import com.waz.zclient.assets2.ImageCompressUtils
 import com.waz.zclient.calling.controllers.CallStartController
 import com.waz.zclient.common.controllers.global.AccentColorController
 import com.waz.zclient.conversation.ConversationController.ConversationChange
-import com.waz.zclient.conversationlist.ConversationListController
+import com.waz.zclient.conversationlist.adapters.ConversationFolderListAdapter.Folder
+import com.waz.zclient.conversationlist.{ConversationListController, FolderStateController}
 import com.waz.zclient.core.stores.conversation.ConversationChangeRequester
 import com.waz.zclient.log.LogUI._
-import com.waz.zclient.utils.Callback
 import com.waz.zclient.utils.ContextUtils._
+import com.waz.zclient.utils.{Callback, currentRotation, rotate}
 import com.waz.zclient.{Injectable, Injector, R}
 import org.threeten.bp.Instant
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
+import scala.util.{Success, Try}
 
 class ConversationController(implicit injector: Injector, context: Context, ec: EventContext)
   extends Injectable with DerivedLogTag {
-  
+
   private implicit val dispatcher = new SerialDispatchQueue(name = "ConversationController")
 
   private lazy val selectedConv          = inject[Signal[SelectedConversationService]]
@@ -63,7 +67,9 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   private lazy val account               = inject[Signal[Option[AccountManager]]]
   private lazy val callStart             = inject[CallStartController]
   private lazy val convListController    = inject[ConversationListController]
+  private lazy val uriHelper             = inject[UriHelper]
   private lazy val accentColorController = inject[AccentColorController]
+  private lazy val selfId                = inject[Signal[UserId]]
 
   private var lastConvId = Option.empty[ConvId]
 
@@ -85,6 +91,13 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   def getConversation(convId: ConvId): Future[Option[ConversationData]] =
     convsStorage.head.flatMap(_.get(convId))
 
+  def isCurrentUserCreator(convId: ConvId): Future[Boolean] = for {
+    convs   <- conversations.head
+    selfId  <- selfId.head
+    conv    <- getConversation(convId)
+    isGroup <- convs.groupConversation(convId).head
+  } yield isGroup && conv.exists(_.creator == selfId)
+
   val currentConvType: Signal[ConversationType] = currentConv.map(_.convType).disableAutowiring()
   val currentConvName: Signal[String] = currentConv.map(_.displayName).map {
     case Name.Empty => getString(R.string.default_deleted_username)
@@ -101,21 +114,52 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
   val currentConvIsTeamOnly: Signal[Boolean] = currentConv.map(_.isTeamOnly)
 
-  lazy val currentConvMembers = for {
-    membersStorage <- membersStorage
-    selfUserId     <- inject[Signal[UserId]]
-    conv           <- currentConvId
-    members        <- membersStorage.activeMembers(conv)
-  } yield members.filter(_ != selfUserId)
+  lazy val currentConvOtherMembers: Signal[Map[UserId, ConversationRole]] = for {
+    selfId  <- selfId
+    members <- currentConvMembers
+  } yield members.filter(_._1 != selfId)
 
-  currentConvId { convId =>
-    conversations(_.forceNameUpdate(convId))
-    conversations.head.foreach(_.forceNameUpdate(convId))
-    if (!lastConvId.contains(convId)) { // to only catch changes coming from SE (we assume it's an account switch)
-      verbose(l"a conversation change bypassed selectConv: last = $lastConvId, current = $convId")
-      convChanged ! ConversationChange(from = lastConvId, to = Option(convId), requester = ConversationChangeRequester.ACCOUNT_CHANGE)
-      lastConvId = Option(convId)
-    }
+  lazy val currentConvMembers: Signal[Map[UserId, ConversationRole]] =
+    for {
+      convId  <- currentConvIdOpt
+      _       =  if (convId.isEmpty) warn(l"Current conversation members queried in the context without the current conversation set")
+      members <- convId.fold(Signal.const(Map.empty[UserId, ConversationRole]))(convMembers)
+    } yield members
+
+  def convMembers(convId: ConvId): Signal[Map[UserId, ConversationRole]] = for {
+    convs          <- conversations
+    members        <- convs.activeMembersData(convId)
+  } yield members.map(m => m.userId -> ConversationRole.getRole(m.role)).toMap
+
+  lazy val selfRole: Signal[ConversationRole] =
+    for {
+      selfId  <- selfId
+      members <- currentConvMembers
+      _       =  if (!members.contains(selfId)) warn(l"No role specified for the self user")
+    } yield members.getOrElse(selfId, ConversationRole.MemberRole)
+
+  def selfRoleInConv(convId: ConvId): Signal[ConversationRole] = for {
+    selfId  <- selfId
+    members <- convMembers(convId)
+    _       =  if (!members.contains(selfId)) warn(l"No role specified for the self user")
+  } yield members.getOrElse(selfId, ConversationRole.MemberRole)
+
+  def setRoleInCurrentConv(userId: UserId, role: ConversationRole): Future[Unit] = for {
+    convs  <- conversations.head
+    convId <- currentConvId.head
+  } yield convs.setConversationRole(convId, userId, role)
+
+  currentConvIdOpt {
+    case Some(convId) =>
+      conversations.head.foreach(_.forceNameUpdate(convId, getString(R.string.default_deleted_username)))
+      if (!lastConvId.contains(convId)) { // to only catch changes coming from SE (we assume it's an account switch)
+        verbose(l"a conversation change bypassed selectConv: last = $lastConvId, current = $convId")
+        convChanged ! ConversationChange(from = lastConvId, to = Option(convId), requester = ConversationChangeRequester.ACCOUNT_CHANGE)
+        lastConvId = Option(convId)
+      }
+    case None =>
+      convChanged ! ConversationChange(from = lastConvId, to = None, requester = ConversationChangeRequester.DELETE_CONVERSATION)
+      lastConvId = None
   }
 
   // this should be the only UI entry point to change conv in SE
@@ -171,40 +215,81 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   def loadClients(userId: UserId): Future[Seq[Client]] =
     otrClientsStorage.head.flatMap(_.getClients(userId)) // TODO: move to SE maybe?
 
-    def sendMessage(text: String, mentions: Seq[Mention] = Nil, quote: Option[MessageId] = None): Future[Option[MessageData]] = {
-      convsUiwithCurrentConv({(ui, id) =>
-        quote.fold2(ui.sendTextMessage(id, text, mentions), ui.sendReplyMessage(_, text, mentions))
-      })
+  def sendMessage(text:     String,
+                  mentions: Seq[Mention] = Nil,
+                  quote:    Option[MessageId] = None,
+                  exp:      Option[Option[FiniteDuration]] = None): Future[Option[MessageData]] =
+    convsUiwithCurrentConv({(ui, id) =>
+      quote.fold2(ui.sendTextMessage(id, text, mentions, exp), ui.sendReplyMessage(_, text, mentions, exp))
+    })
+
+  def sendTextMessage(convs:    Seq[ConvId],
+                      text:     String,
+                      mentions: Seq[Mention] = Nil,
+                      quote:    Option[MessageId] = None,
+                      exp:      Option[Option[FiniteDuration]] = None): Future[Seq[Option[MessageData]]] =
+    convsUi.head.flatMap { ui =>
+      Future.sequence(convs.map(id =>
+        quote.fold2(ui.sendTextMessage(id, text, mentions, exp), ui.sendReplyMessage(_, text, mentions, exp))
+      ))
     }
 
-  def sendMessage(input: AssetService.RawAssetInput): Future[Option[MessageData]] =
-    convsUiwithCurrentConv((ui, id) => ui.sendAssetMessage(id, input))
+  def sendAssetMessage(content: ContentForUpload): Future[Option[MessageData]] =
+    convsUiwithCurrentConv((ui, id) => ui.sendAssetMessage(id, content))
 
-  def sendMessage(uri: URI, activity: Activity): Future[Option[MessageData]] =
+  def sendAssetMessage(content:  ContentForUpload,
+                       activity: Activity,
+                       exp:      Option[Option[FiniteDuration]]): Future[Option[MessageData]] =
     convsUiwithCurrentConv((ui, id) =>
       accentColorController.accentColor.head.flatMap(color =>
-        ui.sendAssetMessage(
-          id,
-          UriInput(uri),
-          (s: Long) => showWifiWarningDialog(s, color)(dispatcher, activity)
-        )
-      )
+        ui.sendAssetMessage(id, content, (s: Long) => showWifiWarningDialog(s, color), exp))
     )
 
-  def sendMessage(audioAsset: AssetForUpload, activity: Activity): Future[Option[MessageData]] =
-    audioAsset match {
-      case asset: com.waz.api.impl.AudioAssetForUpload =>
-        accentColorController.accentColor.head.flatMap(color =>
-          convsUiwithCurrentConv((ui, id) =>
-            ui.sendMessage(
-              id,
-              asset,
-              (s: Long) => showWifiWarningDialog(s, color)(dispatcher, activity)
-            )
-          )
-        )
-      case _ => Future.successful(None)
+  // NOTE: Rotating makes sense only for images, but at this point we accept any content. If it's
+  // not an image, `currentRotation` will return 0 and the method will return the original content.
+  def rotateImageIfNeeded(image: Content): Future[Content] = {
+    def rotateIfNeeded(image: Content, path: String): Future[Try[Content]] = {
+      val rotation = currentRotation(path)
+      if (rotation == 0) Future.successful(Success(image))
+      // rotation and compression is time-consuming - better not to do it on the Ui thread
+      else Future { rotate(path, rotation).map(ImageCompressUtils.toJpg) }(Threading.ImageDispatcher)
     }
+
+    (image match {
+      case Content.Uri(uri)      => rotateIfNeeded(image, uri.getPath)
+      case Content.File(_, file) => rotateIfNeeded(image, file.getPath)
+      case _                     => Future.successful(Success(image))
+    }).map(_.getOrElse(image))
+  }
+
+  private def sendAssetMessage(convs:    Seq[ConvId],
+                               content:  ContentForUpload,
+                               activity: Activity,
+                               exp:      Option[Option[FiniteDuration]]): Future[Seq[Option[MessageData]]] =
+    for {
+      ui    <- convsUi.head
+      color <- accentColorController.accentColor.head
+      msgs  <- Future.traverse(convs) { id =>
+                 ui.sendAssetMessage(id, content, (s: Long) => showWifiWarningDialog(s, color), exp)
+               }
+    } yield msgs
+
+  def sendAssetMessage(bitmap: Bitmap, assetName: String): Future[Option[MessageData]] =
+    for {
+      img     <- Future { ImageCompressUtils.toJpg(bitmap) }(Threading.Background)
+      content =  ContentForUpload(assetName, img)
+      data    <- convsUiwithCurrentConv((ui, id) => ui.sendAssetMessage(id, content))
+    } yield data
+
+  def sendAssetMessage(uri:      URI,
+                       activity: Activity,
+                       exp:      Option[Option[FiniteDuration]],
+                       convs:    Seq[ConvId] = Seq()): Future[Option[MessageData]] =
+    for {
+      content <- Future.fromTry(uriHelper.extractFileName(uri).map(ContentForUpload(_,  Content.Uri(uri))))
+      msg     <- if (convs.isEmpty) sendAssetMessage(content, activity, exp)
+                 else sendAssetMessage(convs, content, activity, exp).map(_.head)
+    } yield msg
 
   def sendMessage(location: api.MessageContent.Location): Future[Option[MessageData]] =
     convsUiwithCurrentConv((ui, id) => ui.sendLocationMessage(id, location))
@@ -235,8 +320,8 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
       if (currentReadReceipts != readReceiptsEnabled)
         service.setReceiptMode(id, if (readReceiptsEnabled) 1 else 0)
 
-  def addMembers(id: ConvId, users: Set[UserId]): Future[Unit] =
-    convsUi.head.flatMap(_.addConversationMembers(id, users)).map(_ => {})
+  def addMembers(id: ConvId, members: Set[UserId], defaultRole: ConversationRole = ConversationRole.MemberRole): Future[Unit] =
+    convsUi.head.flatMap(_.addConversationMembers(id, members, defaultRole)).map(_ => {})
 
   def removeMember(user: UserId): Future[Unit] =
     for {
@@ -278,10 +363,19 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
     if (alsoLeave) leave(id).flatMap(_ => clear(id)) else clear(id)
   }
 
-  def createGuestRoom(): Future[ConversationData] = createGroupConversation(Some(context.getString(R.string.guest_room_name)), Set(), false, false)
+  def createGuestRoom(): Future[ConversationData] =
+    createGroupConversation(Some(context.getString(R.string.guest_room_name)), Set.empty, false, false)
 
-  def createGroupConversation(name: Option[Name], users: Set[UserId], teamOnly: Boolean, readReceipts: Boolean): Future[ConversationData] =
-    convsUi.head.flatMap(_.createGroupConversation(name, users, teamOnly, if (readReceipts) 1 else 0)).map(_._1)
+  def createGroupConversation(name:         Option[Name],
+                              userIds:      Set[UserId],
+                              teamOnly:     Boolean,
+                              readReceipts: Boolean,
+                              defaultRole:  ConversationRole = ConversationRole.MemberRole
+                             ): Future[ConversationData] = for {
+    convsUi   <- convsUi.head
+    _         <- inject[FolderStateController].update(Folder.GroupId, isExpanded = true)
+    (conv, _) <- convsUi.createGroupConversation(name, userIds, teamOnly, if (readReceipts) 1 else 0, defaultRole)
+  } yield conv
 
   def withCurrentConvName(callback: Callback[String]): Unit = currentConvName.head.foreach(callback.callback)(Threading.Ui)
 
@@ -342,7 +436,7 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
 object ConversationController extends DerivedLogTag {
   val ARCHIVE_DELAY = 500.millis
-  val MaxParticipants: Int = 300
+  val MaxParticipants: Int = 500
 
   case class ConversationChange(from: Option[ConvId], to: Option[ConvId], requester: ConversationChangeRequester) {
     def toConvId: ConvId = to.orNull // TODO: remove when not used anymore

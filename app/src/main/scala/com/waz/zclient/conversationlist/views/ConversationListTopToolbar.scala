@@ -28,9 +28,10 @@ import com.waz.service.ZMessaging
 import com.waz.utils.NameParts
 import com.waz.utils.events.{EventStream, Signal}
 import com.waz.zclient.common.controllers.UserAccountsController
+import com.waz.zclient.common.drawables.TeamIconDrawable
 import com.waz.zclient.common.views.GlyphButton
-import com.waz.zclient.conversationlist.{ConversationListAdapter, ListSeparatorDrawable}
-import com.waz.zclient.drawables.TeamIconDrawable
+import com.waz.zclient.conversationlist.ConversationListController.{Folders, ListMode, Normal}
+import com.waz.zclient.conversationlist.ListSeparatorDrawable
 import com.waz.zclient.tracking.AvailabilityChanged
 import com.waz.zclient.ui.text.TypefaceTextView
 import com.waz.zclient.ui.views.CircleView
@@ -78,18 +79,18 @@ abstract class ConversationListTopToolbar(val context: Context, val attrs: Attri
       }
     }
 
-  def setTitle(mode: ConversationListAdapter.ListMode, currentUser: Option[UserData]): Unit = (mode, currentUser) match {
-    case (ConversationListAdapter.Normal, Some(user)) if user.teamId.nonEmpty =>
+  def setTitle(mode: ListMode, currentUser: Option[UserData]): Unit = (mode, currentUser) match {
+    case (Normal | Folders, Some(user)) if user.teamId.nonEmpty =>
       title.setText(user.displayName)
-      AvailabilityView.displayLeftOfText(title, user.availability, title.getCurrentTextColor, pushDown = true)
+      AvailabilityView.displayStartOfText(title, user.availability, title.getCurrentTextColor, pushDown = true)
       title.onClick { AvailabilityView.showAvailabilityMenu(AvailabilityChanged.ListHeader) }
-    case (ConversationListAdapter.Normal, Some(user)) =>
+    case (Normal | Folders, Some(user)) =>
       title.setText(user.displayName)
-      AvailabilityView.displayLeftOfText(title, Availability.None, title.getCurrentTextColor)
+      AvailabilityView.displayStartOfText(title, Availability.None, title.getCurrentTextColor)
       title.setOnClickListener(null)
     case (mode, userOpt) =>
       title.setText(mode.nameId)
-      AvailabilityView.displayLeftOfText(title, Availability.None, title.getCurrentTextColor)
+      AvailabilityView.displayStartOfText(title, Availability.None, title.getCurrentTextColor)
       title.setOnClickListener(null)
   }
 
@@ -116,12 +117,12 @@ class NormalTopToolbar(override val context: Context, override val attrs: Attrib
   } yield (user, team)
 
   info.onUi {
-    case (user, Some(team)) =>
-      drawable.assetId ! None
-      drawable.setInfo(NameParts.maybeInitial(team.name).getOrElse(""), TeamIconDrawable.TeamCorners, selected = false)
+    case (_, Some(team)) =>
+      drawable.setPicture(team.picture)
+      drawable.setInfo(NameParts.maybeInitial(team.name).getOrElse(""), TeamIconDrawable.TeamShape, selected = false)
     case (user, _) =>
-      drawable.assetId ! user.picture
-      drawable.setInfo(NameParts.maybeInitial(user.displayName).getOrElse(""), TeamIconDrawable.UserCorners, selected = false)
+      drawable.setPicture(user.picture)
+      drawable.setInfo(NameParts.maybeInitial(user.displayName).getOrElse(""), TeamIconDrawable.UserShape, selected = false)
   }
   profileButton.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
   profileButton.setImageDrawable(drawable)

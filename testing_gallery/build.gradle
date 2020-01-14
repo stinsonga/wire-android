@@ -12,10 +12,10 @@ android {
 
     defaultConfig {
         applicationId "com.wire.testinggallery"
-        minSdkVersion 17
+        minSdkVersion 21
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode System.getenv("BUILD_NUMBER") as Integer ?: 99999
-        versionName "6.1." + versionCode
+        versionName "6.3." + versionCode
     }
 
     buildTypes {
@@ -39,7 +39,7 @@ android {
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation "com.android.support:appcompat-v7:27.0.0"
+    implementation "androidx.appcompat:appcompat:1.0.0"
     implementation 'com.google.code.gson:gson:2.2.4'
     implementation 'com.google.guava:guava:19.0'
 }

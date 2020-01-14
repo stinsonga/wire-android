@@ -20,24 +20,31 @@ package com.waz.zclient
 import java.util.Locale
 
 import android.graphics.drawable.{Drawable, LayerDrawable}
-import android.graphics.{Canvas, LightingColorFilter, RectF}
-import android.support.v7.preference.Preference
-import android.support.v7.preference.Preference.{OnPreferenceChangeListener, OnPreferenceClickListener}
-import android.text.{Editable, TextWatcher}
+import android.graphics.{Bitmap => AndroidBitmap, _}
+import android.text.{Editable, InputType, TextWatcher}
 import android.view.View._
 import android.view.ViewGroup.LayoutParams
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
 import android.view.{View, ViewGroup}
 import android.widget.{EditText, SeekBar, TextView}
+import androidx.exifinterface.media.ExifInterface
+import androidx.preference.Preference
+import androidx.preference.Preference.{OnPreferenceChangeListener, OnPreferenceClickListener}
 import com.waz.model.otr.Client
 import com.waz.utils.events.Signal
 import com.waz.utils.returning
 import com.waz.zclient.paintcode.WireDrawable
 import com.waz.zclient.paintcode.WireStyleKit.ResizingBehavior
+import com.waz.zclient.ui.utils.MathUtils
 import com.waz.zclient.ui.views.OnDoubleClickListener
 import com.waz.zclient.utils.ContextUtils._
+import io.reactivex.functions.Consumer
+import kotlin.jvm.functions.{Function0, Function1}
 
 import scala.concurrent.duration._
+import scala.language.implicitConversions
+import scala.util.Try
 
 package object utils {
 
@@ -190,11 +197,12 @@ package object utils {
       }){ textView.addTextChangedListener }
     }
 
-    def getCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Int): Drawable = {
+    def getCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Option[Int] = None): Drawable = {
+      val styledColor = color.getOrElse(getStyledColor(R.attr.wirePrimaryTextColor)(textView.getContext))
       val size = textView.getTextSize.toInt
       drawMethod match {
         case Some(draw) =>
-          returning(new ContentCompoundDrawable(draw, getStyledColor(R.attr.wirePrimaryTextColor)(textView.getContext))) {
+          returning(new ContentCompoundDrawable(draw, styledColor)) {
             _.setBounds(0, 0, size, size)
           }
         case _ =>
@@ -202,12 +210,76 @@ package object utils {
       }
     }
 
-    def setStartCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Int): Unit = {
+    def setStartCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Option[Int] = None): Unit = {
       textView.setCompoundDrawablesRelative(getCompoundDrawable(drawMethod, color), null, null, null)
     }
 
-    def setEndCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Int): Unit = {
+    def setEndCompoundDrawable(drawMethod: Option[(Canvas, RectF, ResizingBehavior, Int) => Unit], color: Option[Int] = None): Unit = {
       textView.setCompoundDrawablesRelative(null, null, getCompoundDrawable(drawMethod, color), null)
+    }
+
+    def displayStartOfText(drawable: Option[Drawable] = None, pushDown: Int = 0): Unit = {
+      drawable.foreach(d => d.setBounds(0, pushDown, d.getIntrinsicWidth, d.getIntrinsicHeight + pushDown))
+      val oldDrawables = textView.getCompoundDrawables
+      textView.setCompoundDrawablesRelative(drawable.orNull, oldDrawables(1), oldDrawables(2), oldDrawables(3))
+    }
+
+    def displayEndOfText(drawable: Option[Drawable] = None, pushDown: Int = 0): Unit = {
+      drawable.foreach(d => d.setBounds(0, pushDown, d.getIntrinsicWidth, d.getIntrinsicHeight + pushDown))
+      val oldDrawables = textView.getCompoundDrawables
+      textView.setCompoundDrawablesRelative(oldDrawables(0), oldDrawables(1), drawable.orNull, oldDrawables(3))
+    }
+
+    /**
+      * Add an ime option to the existing options
+      * @param option
+      */
+    def addImeOption(option: Int): Unit = {
+      textView.setImeOptions(textView.getImeOptions() | option)
+    }
+
+    /**
+      * Remove an ime option from the existing options, if present
+      * @param option
+      */
+    def removeImeOption(option: Int): Unit = {
+      textView.setImeOptions(MathUtils.removeBinaryFlag(textView.getImeOptions(), option))
+    }
+
+    /**
+      * Add an input type to the existing input types
+      * @param inputType
+      */
+    def addInputType(inputType: Int): Unit = {
+      textView.setInputType(textView.getInputType() | inputType)
+    }
+
+    /**
+      * Remove an input type from the existing input types, if present
+      * @param inputType
+      */
+    def removeInputType(inputType: Int): Unit = {
+      textView.setInputType(MathUtils.removeBinaryFlag(textView.getInputType(), inputType))
+    }
+
+    /**
+      * Enable or disable private mode and suggestions on the field
+      * - If enabled, enables incognito mode and disables suggestions
+      * - If disabled, disables incognito mode and enables suggestions
+      * @param on true if private mode should be switched on, false if it should be switched off
+      */
+    def setPrivateMode(on: Boolean): Unit = {
+      if(on) {
+        textView.addInputType(InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+        // this disables autocomplete because it implies that you will provide your
+        // own autocomplete facility. We don't, so no autocomplete is shown
+        textView.addInputType(InputType.TYPE_TEXT_FLAG_AUTO_COMPLETE)
+        textView.addImeOption(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING)
+      } else {
+        textView.removeInputType(InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)
+        textView.removeInputType(InputType.TYPE_TEXT_FLAG_AUTO_COMPLETE)
+        textView.removeImeOption(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING)
+      }
     }
   }
 
@@ -288,5 +360,52 @@ package object utils {
     if (!oneLiner) sb.append("\n")
 
     sb.toString()
+  }
+
+  object ScalaToKotlin {
+    implicit def f0(f: () => Unit): Function0[kotlin.Unit] = new Function0[kotlin.Unit]() {
+      def invoke(): kotlin.Unit = {
+        f()
+        kotlin.Unit.INSTANCE
+      }
+    }
+
+    implicit def f1[T](f: T => Unit): Function1[T, kotlin.Unit] = new Function1[T, kotlin.Unit]() {
+      def invoke(t: T): kotlin.Unit = {
+        f(t)
+        kotlin.Unit.INSTANCE
+      }
+    }
+
+    implicit def toConsumer[T](f: T => Unit): Consumer[T] = new Consumer[T] {
+      def accept(t: T): Unit = f(t)
+    }
+  }
+
+  def currentRotation(path: String): Int = Try(rotation(new ExifInterface(path))).getOrElse(0)
+
+  def rotate(path: String, rotation: Int): Try[AndroidBitmap] =
+    Try(BitmapFactory.decodeFile(path, BitmapOptions)).map(rotate(_, rotation))
+
+  def rotateIfNeeded(bitmap: AndroidBitmap, path: String): Try[AndroidBitmap] = Try {
+    val cr = currentRotation(path)
+    if (cr == 0) bitmap else rotate(bitmap, cr)
+  }
+
+  private def rotation(exif: ExifInterface): Int = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) match {
+    case ExifInterface.ORIENTATION_ROTATE_90  => 90
+    case ExifInterface.ORIENTATION_ROTATE_180 => 180
+    case ExifInterface.ORIENTATION_ROTATE_270 => 270
+    case _                                    => 0
+  }
+
+  private def rotate(bitmap: AndroidBitmap, rotation: Int): AndroidBitmap = {
+    val matrix = new Matrix()
+    matrix.postRotate(rotation)
+    AndroidBitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth, bitmap.getHeight, matrix, true)
+  }
+
+  val BitmapOptions: BitmapFactory.Options = returning(new BitmapFactory.Options) {
+    _.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
   }
 }

@@ -19,10 +19,8 @@ package com.waz.zclient.appentry.fragments
 
 import android.content.Context
 import android.graphics.Color
-import android.os.Build.VERSION.SDK_INT
-import android.os.Build.VERSION_CODES.KITKAT
 import android.os.Bundle
-import android.support.v4.content.ContextCompat
+import androidx.core.content.ContextCompat
 import android.transition._
 import android.view.{LayoutInflater, View, ViewGroup}
 import android.widget.{FrameLayout, LinearLayout}
@@ -253,7 +251,7 @@ class SignInFragment
   override def onCreate(savedInstanceState: Bundle): Unit = {
     super.onCreate(savedInstanceState)
 
-    val transition = if (SDK_INT >= KITKAT) Option(new AutoTransition2()) else None
+    val transition = Option(new AutoTransition2())
 
     def switchScene(sceneIndex: Int): Unit = transition.fold[Unit]({
       container.foreach(_.removeAllViews())
@@ -371,24 +369,25 @@ class SignInFragment
             activity.enableProgress(true)
 
             for {
-              email     <- email.head
-              password  <- password.head
-              req       <- accountsService.loginEmail(email, password)
+              email    <- email.head
+              password <- password.head
+              req      <- accountsService.loginEmail(email, password)
             } yield onResponse(req, m).right.foreach { id =>
               KeyboardUtils.closeKeyboardIfShown(getActivity)
               activity.showFragment(FirstLaunchAfterLoginFragment(id), FirstLaunchAfterLoginFragment.Tag)
             }
           case m@SignInMethod(Register, Email, false) =>
             for {
-              email     <- email.head
-              password  <- password.head
-              name      <- name.head
-              req       <- accountsService.requestEmailCode(EmailAddress(email))
+              email    <- email.head
+              password <- password.head
+              name     <- name.head
             } yield {
               if (strongPasswordValidator.isValidPassword(password)) {
-                onResponse(req, m).right.foreach { _ =>
-                  KeyboardUtils.closeKeyboardIfShown(getActivity)
-                  activity.showFragment(VerifyEmailWithCodeFragment(email, name, password), VerifyEmailWithCodeFragment.Tag)
+                accountsService.requestEmailCode(EmailAddress(email)).foreach { req =>
+                  onResponse(req, m).right.foreach { _ =>
+                    KeyboardUtils.closeKeyboardIfShown(getActivity)
+                    activity.showFragment(VerifyEmailWithCodeFragment(email, name, password), VerifyEmailWithCodeFragment.Tag)
+                  }
                 }
               } else { // Invalid password
                 passwordPolicyHint.foreach(_.setTextColor(getColor(R.color.teams_error_red)))

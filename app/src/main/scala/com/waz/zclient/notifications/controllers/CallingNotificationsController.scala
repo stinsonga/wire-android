@@ -22,18 +22,18 @@ import android.app.{NotificationManager, PendingIntent}
 import android.content
 import android.graphics.{Bitmap, Color}
 import android.os.Build
-import android.support.v4.app.NotificationCompat
+import androidx.core.app.NotificationCompat
 import com.waz.bitmap.BitmapUtils
 import com.waz.content.UserPreferences
-import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model._
+import com.waz.service.assets.AssetService.BitmapResult
+import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.service.assets.AssetService.BitmapResult.BitmapLoaded
 import com.waz.service.call.CallInfo.CallState._
 import com.waz.service.{AccountManager, AccountsService, GlobalModule, ZMessaging}
 import com.waz.services.calling.CallWakeService._
 import com.waz.services.calling.CallingNotificationsService
 import com.waz.threading.Threading.Implicits.Background
-import com.waz.ui.MemoryImageCache.BitmapRequest.Regular
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.utils.wrappers.{Context, Intent}
 import com.waz.utils._
@@ -41,7 +41,6 @@ import com.waz.zclient.Intents.{CallIntent, OpenCallingScreen}
 import com.waz.zclient._
 import com.waz.zclient.calling.controllers.CallController
 import com.waz.zclient.common.controllers.SoundController
-import com.waz.zclient.common.views.ImageController
 import com.waz.zclient.log.LogUI._
 import com.waz.zclient.notifications.controllers.NotificationManagerWrapper.{IncomingCallNotificationsChannelId, OngoingNotificationsChannelId}
 import com.waz.zclient.utils.ContextUtils.{getString, _}
@@ -69,7 +68,7 @@ class CallingNotificationsController(implicit cxt: WireContext, eventContext: Ev
                          .calls
                          .values
                          .filter(c => c.state == OtherCalling || (curCallId.contains(c.convId) && c.state != Ongoing))
-                         .map(c => c.convId -> (c.caller, c.account))
+                         .map(c => c.convId -> (c.caller, c.selfParticipant.userId))
                          .toSeq
     } yield (curCallId, allCalls)
 
@@ -109,7 +108,7 @@ class CallingNotificationsController(implicit cxt: WireContext, eventContext: Ev
                                     CallNotification(
                                       convId.str.hashCode,
                                       convId,
-                                      callInfo.account,
+                                      callInfo.selfParticipant.userId,
                                       callInfo.startTime,
                                       title,
                                       conv.fold(Name.Empty)(_.displayName),
@@ -180,7 +179,7 @@ class CallingNotificationsController(implicit cxt: WireContext, eventContext: Ev
 
   private def getBitmapSignal(z: ZMessaging, caller: UserId) = for {
       Some(id) <- z.usersStorage.optSignal(caller).map(_.flatMap(_.picture))
-      bitmap   <- inject[ImageController].imageSignal(z, id, Regular(callImageSizePx))
+      bitmap   <- Signal.const[BitmapResult](BitmapResult.Empty) //TODO: Use new assets engine to fetch the bitmap
     } yield
       bitmap match {
         case BitmapLoaded(bmp, _) => Option(BitmapUtils.createRoundBitmap(bmp, callImageSizePx, 0, Color.TRANSPARENT))
@@ -214,8 +213,9 @@ object CallingNotificationsController {
 
   val CallImageSizeDp = 64
 
-  def androidNotificationBuilder(not: CallNotification)(implicit cxt: content.Context): NotificationCompat.Builder = {
+  def androidNotificationBuilder(not: CallNotification, treatAsIncomingCall: Boolean = false)(implicit cxt: content.Context): NotificationCompat.Builder = {
     val title = if (not.isGroup) not.convName else not.caller
+
     val message = (not.isGroup, not.videoCall) match {
       case (true, true)   => getString(R.string.system_notification__video_calling_group, not.caller)
       case (true, false)  => getString(R.string.system_notification__calling_group, not.caller)
@@ -223,17 +223,23 @@ object CallingNotificationsController {
       case (false, false) => getString(R.string.system_notification__calling_one)
     }
 
-    val builder = new NotificationCompat.Builder(cxt, if (not.isMainCall) OngoingNotificationsChannelId else IncomingCallNotificationsChannelId)
+    val style = new NotificationCompat.BigTextStyle()
+      .setBigContentTitle(title)
+      .bigText(message)
+
+    val isIncomingCall = !not.isMainCall || treatAsIncomingCall
+    val channelId = if (isIncomingCall) IncomingCallNotificationsChannelId else OngoingNotificationsChannelId
+    val priority = if (isIncomingCall) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_MAX
+
+    val builder = new NotificationCompat.Builder(cxt, channelId)
       .setSmallIcon(R.drawable.call_notification_icon)
       .setLargeIcon(not.bitmap.orNull)
       .setContentTitle(title)
       .setContentText(message)
       .setContentIntent(OpenCallingScreen())
-      .setStyle(new NotificationCompat.BigTextStyle()
-        .setBigContentTitle(title)
-        .bigText(message))
+      .setStyle(style)
       .setCategory(NotificationCompat.CATEGORY_CALL)
-      .setPriority(if (not.isMainCall) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_MAX) //incoming calls go higher up in the list)
+      .setPriority(priority)
       .setOnlyAlertOnce(true)
       .setOngoing(true)
 
@@ -245,19 +251,35 @@ object CallingNotificationsController {
     not.action match {
       case NotificationAction.DeclineOrJoin =>
         builder
-          .addAction(R.drawable.ic_menu_silence_call_w, getString(R.string.system_notification__silence_call), createEndIntent(not.accountId, not.convId))
-          .addAction(R.drawable.ic_menu_join_call_w, getString(R.string.system_notification__join_call), if (not.isMainCall) createJoinIntent(not.accountId, not.convId) else CallIntent(not.accountId, not.convId))
+          .addAction(
+            R.drawable.ic_menu_silence_call_w,
+            getString(R.string.system_notification__silence_call),
+            createEndIntent(not.accountId, not.convId)
+          )
+          .addAction(
+            R.drawable.ic_menu_join_call_w,
+            getString(R.string.system_notification__join_call),
+            if (not.isMainCall) createJoinIntent(not.accountId, not.convId) else CallIntent(not.accountId, not.convId)
+          )
 
       case NotificationAction.Leave =>
-        builder.addAction(R.drawable.ic_menu_end_call_w, getString(R.string.system_notification__leave_call), createEndIntent(not.accountId, not.convId))
+        builder.addAction(
+          R.drawable.ic_menu_end_call_w,
+          getString(R.string.system_notification__leave_call),
+          createEndIntent(not.accountId, not.convId)
+        )
 
       case _ => //no available action
     }
     builder
   }
 
-  def createJoinIntent(account: UserId, convId: ConvId)(implicit cxt: content.Context) = pendingIntent((account.str + convId.str).hashCode, joinIntent(Context.wrap(cxt), account, convId))
-  def createEndIntent(account: UserId, convId: ConvId)(implicit cxt: content.Context) = pendingIntent((account.str + convId.str).hashCode, endIntent(Context.wrap(cxt), account, convId))
+  private def createJoinIntent(account: UserId, convId: ConvId)(implicit cxt: content.Context) =
+    pendingIntent((account.str + convId.str).hashCode, joinIntent(Context.wrap(cxt), account, convId))
 
-  def pendingIntent(reqCode: Int, intent: Intent)(implicit cxt: content.Context) = PendingIntent.getService(cxt, reqCode, Intent.unwrap(intent), PendingIntent.FLAG_UPDATE_CURRENT)
+  private def createEndIntent(account: UserId, convId: ConvId)(implicit cxt: content.Context) =
+    pendingIntent((account.str + convId.str).hashCode, endIntent(Context.wrap(cxt), account, convId))
+
+  private def pendingIntent(reqCode: Int, intent: Intent)(implicit cxt: content.Context) =
+    PendingIntent.getService(cxt, reqCode, Intent.unwrap(intent), PendingIntent.FLAG_UPDATE_CURRENT)
 }

@@ -21,7 +21,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
-import android.support.v7.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatActivity;
 
 public class CaptureDocumentActivity extends AppCompatActivity {
 
@@ -39,6 +39,8 @@ public class CaptureDocumentActivity extends AppCompatActivity {
             return resolver.getImageUri();
         } else if (mime.startsWith("video")) {
             return resolver.getVideoUri();
+        } else if (mime.equals("application/octet-stream")) {
+            return resolver.getBackupUri();
         } else {
             return resolver.getDocumentUri();
         }

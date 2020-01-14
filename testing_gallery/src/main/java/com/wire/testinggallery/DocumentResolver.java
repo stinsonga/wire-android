@@ -54,6 +54,7 @@ public class DocumentResolver {
         add("wma");
         add("ac3");
         add("ogg");
+        add("m4a");
     }};
     private final static List<String> IMAGE_EXTENSIONS = new ArrayList<String>() {{
         add("gif");
@@ -61,6 +62,10 @@ public class DocumentResolver {
         add("jpg");
         add("jpeg");
         add("png");
+    }};
+
+    private final static List<String> BACKUP_EXTENSIONS = new ArrayList<String>() {{
+        add("android_wbu");
     }};
 
     private final ContentResolver contentResolver;
@@ -72,6 +77,11 @@ public class DocumentResolver {
     Uri getDocumentUri() {
         Log.i(TAG, "Received request for File");
         return fileQuery(WIRE_TESTING_FILES_DIRECTORY, FILE_EXTENSIONS);
+    }
+
+    Uri getBackupUri() {
+        Log.i(TAG, "Received request for Backup");
+        return fileQuery(WIRE_TESTING_FILES_DIRECTORY, BACKUP_EXTENSIONS);
     }
 
     Uri getVideoUri() {

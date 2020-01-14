@@ -59,7 +59,6 @@ trait MessageViewPart extends View {
   def set(msg: MessageAndLikes, part: Option[MessageContent], opts: Option[MsgBindOptions] = None): Unit =
     messageAndLikes.publish(msg, Threading.Ui)
 
-
   //By default disable clicks for all view types. There are fewer that need click functionality than those that don't
   this.onClick {}
   this.onLongClick(false)
@@ -218,7 +217,7 @@ class UserPartView(context: Context, attrs: AttributeSet, style: Int) extends Li
     case _ => None
   }
 
-  userId(chathead.setUserId)
+  userId(chathead.loadUser)
 
   user.map(u => if (u.isWireBot) u.name else if (u.deleted) Name(getString(R.string.default_deleted_username)) else u.getDisplayName).onUi(tvName.setTransformedText(_))
   user.map(_.isWireBot).on(Threading.Ui) { isBot.setVisible }

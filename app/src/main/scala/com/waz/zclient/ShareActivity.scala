@@ -23,10 +23,10 @@ import java.io.File
 import android.Manifest.permission.READ_EXTERNAL_STORAGE
 import android.content.{ContentUris, Context, Intent}
 import android.net.Uri
-import android.os.{Build, Bundle, Environment}
+import android.os.{Bundle, Environment}
 import android.provider.DocumentsContract._
 import android.provider.MediaStore
-import android.support.v4.app.ShareCompat
+import androidx.core.app.ShareCompat
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.permissions.PermissionsService
 import com.waz.service.AccountsService
@@ -92,8 +92,7 @@ class ShareActivity extends BaseActivity with ActivityHelper {
   private def handleIncomingIntent() =
     inject[PermissionsService].requestAllPermissions(ListSet(READ_EXTERNAL_STORAGE)).map {
       case true =>
-        val intent = getIntent
-        verbose(l"${RichIntent(intent)}")
+        verbose(l"${RichIntent(getIntent)}")
         val ir = ShareCompat.IntentReader.from(this)
         if (!ir.isShareIntent) finish()
         else {
@@ -102,7 +101,6 @@ class ShareActivity extends BaseActivity with ActivityHelper {
             val uris =
               (if (ir.isMultipleShare) (0 until ir.getStreamCount).flatMap(i => Option(ir.getStream(i))) else Option(ir.getStream).toSeq)
                 .flatMap(uri => getPath(getApplicationContext, uri))
-
             if (uris.nonEmpty)
               sharing.sharableContent ! Some(if (ir.getType.startsWith("image/") && uris.size == 1) ImageContent(uris) else FileContent(uris))
             else finish()
@@ -142,7 +140,7 @@ object ShareActivity extends DerivedLogTag {
     */
   def getPath(context: Context, uri: Uri): Option[AndroidURI] = {
     val default = Some(new AndroidURI(uri)) // to be returned in most cases if we fail to resolve the path
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT && isDocumentUri(context, uri)) {
+    if (isDocumentUri(context, uri)) {
       (uri.getAuthority match {
         case "com.android.externalstorage.documents" =>
           val split = getDocumentId(uri).split(":")

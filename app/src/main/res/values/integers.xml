@@ -35,6 +35,7 @@
     <integer name="calling_animation_duration_long">550</integer>
 
     <!-- Cursor-->
+    <integer name="cursor_starting_lines">2</integer>
     <integer name="cursor__max_lines">6</integer>
 
     <!-- Wire Values-->
@@ -104,4 +105,6 @@
 
     <integer name="team_tabs__animation_duration">100</integer>
     <integer name="slide_transition_fade_duration">250</integer>
+
+    <integer name="max_folder_name_length">64</integer>
 </resources>

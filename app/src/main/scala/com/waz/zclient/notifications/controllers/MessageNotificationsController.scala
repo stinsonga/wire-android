@@ -22,20 +22,19 @@ import android.content.Context
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
-import android.support.annotation.RawRes
-import android.support.v4.app.NotificationCompat
+import androidx.core.app.NotificationCompat
 import android.text.TextUtils
+import androidx.annotation.RawRes
+import com.bumptech.glide.request.RequestOptions
 import com.waz.api.NotificationsHandler.NotificationType
 import com.waz.api.NotificationsHandler.NotificationType._
-import com.waz.bitmap.BitmapUtils
-import com.waz.content._
+import com.waz.content.{UserPreferences, _}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
+import com.waz.model.Picture
 import com.waz.model._
-import com.waz.service.images.ImageLoader
 import com.waz.service.push.NotificationUiController
 import com.waz.service.{AccountsService, UiLifeCycle}
-import com.waz.threading.{CancellableFuture, Threading}
-import com.waz.ui.MemoryImageCache.BitmapRequest
+import com.waz.threading.Threading
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.utils.wrappers.Bitmap
 import com.waz.zclient.WireApplication._
@@ -43,15 +42,15 @@ import com.waz.zclient.common.controllers.SoundController
 import com.waz.zclient.common.controllers.global.AccentColorController
 import com.waz.zclient.controllers.navigation.Page
 import com.waz.zclient.conversation.ConversationController
+import com.waz.zclient.glide.WireGlide
 import com.waz.zclient.log.LogUI._
 import com.waz.zclient.messages.controllers.NavigationController
-import com.waz.zclient.utils.ContextUtils.{getInt, getIntArray, toPx}
+import com.waz.zclient.utils.ContextUtils.{getInt, getIntArray}
 import com.waz.zclient.utils.{ResString, RingtoneUtils}
 import com.waz.zclient.{BuildConfig, Injectable, Injector, R}
 import org.threeten.bp.Instant
 
 import scala.concurrent.Future
-import scala.concurrent.duration._
 
 class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_INT > Build.VERSION_CODES.M,
                                      applicationId: String = BuildConfig.APPLICATION_ID)
@@ -72,6 +71,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
   private lazy val convsStorage          = inject[Signal[ConversationStorage]]
   private lazy val userStorage           = inject[Signal[UsersStorage]]
   private lazy val teamsStorage          = inject[TeamsStorage]
+  private lazy val userPrefs             = inject[Signal[UserPreferences]]
 
   override val notificationsSourceVisible: Signal[Map[UserId, Set[ConvId]]] =
     for {
@@ -227,6 +227,12 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
       case _                     => Future.successful(None)
     }
 
+  private def getOpenConvIntent(account: UserId, n: NotificationData, requestBase: Int) : Option[(UserId, ConvId, Int)] =
+    if (n.isConvDeleted) None else Some((account, n.conv, requestBase))
+
+  private def getAction(account: UserId, n: NotificationData, requestBase: Int, offset: Int, bundleEnabled: Boolean)=
+    if (n.isConvDeleted) None else Some((account, n.conv, requestBase + 1, bundleEnabled))
+
   private def singleNotificationProperties(props: NotificationProps, account: UserId, n: NotificationData, teamName: Option[Name]) = {
     verbose(l"singleNotificationProperties: $account, $n, $teamName")
     for {
@@ -239,51 +245,46 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
         contentTitle             = Some(title),
         contentText              = Some(body),
         style                    = Some(bigTextStyle),
-        openConvIntent           = Some((account, n.conv, requestBase)),
+        openConvIntent           = getOpenConvIntent(account, n, requestBase),
         clearNotificationsIntent = Some((account, Some(n.conv)))
       )
-      if (n.msgType != NotificationType.CONNECT_REQUEST)
-        specProps.copy(
-          action1 = Some((account, n.conv, requestBase + 1, bundleEnabled)),
-          action2 = Some((account, n.conv, requestBase + 2, bundleEnabled))
-        )
-      else specProps
-    }
-  }
 
-  private def getMessageTitle(account: UserId, n: NotificationData, teamName: Option[String]) = {
-    if (n.ephemeral)
-      Future.successful(ResString(R.string.notification__message__ephemeral_someone))
-    else {
-      getConvName(account, n).map(_.getOrElse(Name.Empty)).map { convName =>
-        teamName match {
-          case Some(name) =>
-            ResString(R.string.notification__message__group__prefix__other, convName, name)
-          case None =>
-            ResString(convName)
-        }
+      if (n.msgType == NotificationType.CONNECT_REQUEST) {
+        specProps
+      } else {
+        specProps.copy(
+          action1 = getAction(account, n, requestBase, 1, bundleEnabled),
+          action2 = getAction(account, n, requestBase, 2, bundleEnabled)
+        )
       }
     }
   }
 
+  private def getMessageTitle(account: UserId, n: NotificationData, teamName: Option[String]) =
+    if (n.isConvDeleted) Future.successful(ResString(R.string.notification__message__conversation_deleted))
+    else if (n.ephemeral) Future.successful(ResString(R.string.notification__message__ephemeral_someone))
+    else getConvName(account, n).map(_.getOrElse(Name.Empty)).map { convName =>
+      teamName match {
+        case Some(name) => ResString (R.string.notification__message__group__prefix__other, convName, name)
+        case None       => ResString(convName)
+      }
+    }
+
   private def getConvName(account: UserId, n: NotificationData) =
     inject[AccountToConvsStorage].apply(account).flatMap {
-      case Some(st) =>
-        st.get(n.conv).map(_.map(_.displayName))
-      case None =>
-        Future.successful(Option.empty[Name])
+      case Some(storage) => storage.get(n.conv).map(_.map(_.displayName))
+      case None          => Future.successful(Option.empty[Name])
     }
 
   private def getUserName(account: UserId, n: NotificationData) =
     inject[AccountToUsersStorage].apply(account).flatMap {
-      case Some(st) =>
-        st.get(n.user).map(_.map(_.getDisplayName))
-      case None =>
-        Future.successful(Option.empty[Name])
+      case Some(storage) => storage.get(n.user).map(_.map(_.getDisplayName))
+      case None          => Future.successful(Option.empty[Name])
     }
 
   private def isGroupConv(account: UserId, n: NotificationData) =
-    inject[AccountToConvsService].apply(account).flatMap {
+    if (n.isConvDeleted) Future.successful(true)
+    else inject[AccountToConvsService].apply(account).flatMap {
       case Some(service) => service.isGroupConversation(n.conv)
       case _ => Future.successful(false)
     }
@@ -292,38 +293,40 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
     val message = n.msg.replaceAll("\\r\\n|\\r|\\n", " ")
 
     for {
-      header <- n.msgType match {
-        case CONNECT_ACCEPTED => Future.successful(ResString.Empty)
-        case _ => getDefaultNotificationMessageLineHeader(account, n, singleConversationInBatch)
-      }
-      convName <- getConvName(account, n).map(_.getOrElse(Name.Empty))
-      userName <- getUserName(account, n).map(_.getOrElse(Name.Empty))
+      header         <- n.msgType match {
+                          case CONNECT_ACCEPTED => Future.successful(ResString.Empty)
+                          case _                => getDefaultNotificationMessageLineHeader(account, n, singleConversationInBatch)
+                        }
+      convName       <- getConvName(account, n).map(_.getOrElse(Name.Empty))
+      userName       <- getUserName(account, n).map(_.getOrElse(Name.Empty))
+      messagePreview <- userPrefs.flatMap(_.preference(UserPreferences.MessagePreview).signal).head
     } yield {
       val body = n.msgType match {
-        case _ if n.ephemeral && n.isSelfMentioned => ResString(R.string.notification__message_with_mention__ephemeral)
-        case _ if n.ephemeral && n.isReply => ResString(R.string.notification__message_with_quote__ephemeral)
-        case _ if n.ephemeral => ResString(R.string.notification__message__ephemeral)
-        case TEXT             => ResString(message)
-        case MISSED_CALL      => ResString(R.string.notification__message__one_to_one__wanted_to_talk)
-        case KNOCK            => ResString(R.string.notification__message__one_to_one__pinged)
-        case ANY_ASSET        => ResString(R.string.notification__message__one_to_one__shared_file)
-        case ASSET            => ResString(R.string.notification__message__one_to_one__shared_picture)
-        case VIDEO_ASSET      => ResString(R.string.notification__message__one_to_one__shared_video)
-        case AUDIO_ASSET      => ResString(R.string.notification__message__one_to_one__shared_audio)
-        case LOCATION         => ResString(R.string.notification__message__one_to_one__shared_location)
-        case RENAME           => ResString(R.string.notification__message__group__renamed_conversation, convName)
-        case MEMBER_LEAVE     => ResString(R.string.notification__message__group__remove)
-        case MEMBER_JOIN      => ResString(R.string.notification__message__group__add)
+        case _ if n.ephemeral && n.isSelfMentioned    => ResString(R.string.notification__message_with_mention__ephemeral)
+        case _ if n.ephemeral && n.isReply            => ResString(R.string.notification__message_with_quote__ephemeral)
+        case _ if n.ephemeral                         => ResString(R.string.notification__message__ephemeral)
+        case TEXT if messagePreview                   => ResString(message)
+        case TEXT                                     => ResString(R.string.notification__message_one_to_one_message_preview)
+        case MISSED_CALL                              => ResString(R.string.notification__message__one_to_one__wanted_to_talk)
+        case KNOCK                                    => ResString(R.string.notification__message__one_to_one__pinged)
+        case ANY_ASSET                                => ResString(R.string.notification__message__one_to_one__shared_file)
+        case IMAGE_ASSET                              => ResString(R.string.notification__message__one_to_one__shared_picture)
+        case VIDEO_ASSET                              => ResString(R.string.notification__message__one_to_one__shared_video)
+        case AUDIO_ASSET                              => ResString(R.string.notification__message__one_to_one__shared_audio)
+        case LOCATION                                 => ResString(R.string.notification__message__one_to_one__shared_location)
+        case RENAME                                   => ResString(R.string.notification__message__group__renamed_conversation, convName)
+        case MEMBER_LEAVE                             => ResString(R.string.notification__message__group__remove)
+        case MEMBER_JOIN                              => ResString(R.string.notification__message__group__add)
+        case CONNECT_ACCEPTED                         => ResString(R.string.notification__message__single__accept_request, userName)
+        case CONNECT_REQUEST                          => ResString(R.string.people_picker__invite__share_text__header, userName)
+        case MESSAGE_SENDING_FAILED                   => ResString(R.string.notification__message__send_failed)
+        case CONVERSATION_DELETED if userName.isEmpty => ResString(R.string.notification__message__conversation_deleted)
+        case CONVERSATION_DELETED                     => ResString(R.string.notification__message__conversation_deleted_by, userName)
         case LIKE if n.likedContent.nonEmpty =>
           n.likedContent.collect {
-            case LikedContent.PICTURE =>
-              ResString(R.string.notification__message__liked_picture)
-            case LikedContent.TEXT_OR_URL =>
-              ResString(R.string.notification__message__liked, n.msg)
+            case LikedContent.PICTURE     => ResString(R.string.notification__message__liked_picture)
+            case LikedContent.TEXT_OR_URL => ResString(R.string.notification__message__liked, n.msg)
           }.getOrElse(ResString(R.string.notification__message__liked_message))
-        case CONNECT_ACCEPTED       => ResString(R.string.notification__message__single__accept_request, userName)
-        case CONNECT_REQUEST        => ResString(R.string.people_picker__invite__share_text__header, userName)
-        case MESSAGE_SENDING_FAILED => ResString(R.string.notification__message__send_failed)
         case _ => ResString.Empty
       }
 
@@ -367,7 +370,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
       }
     }
 
-  @TargetApi(21)
+  @TargetApi(Build.VERSION_CODES.LOLLIPOP)
   private def getMessageSpannable(header: ResString, body: ResString, isTextMessage: Boolean) = {
     val spans = Span(Span.ForegroundColorSpanBlack, Span.HeaderRange) ::
       (if (!isTextMessage) List(Span(Span.StyleSpanItalic, Span.BodyRange)) else Nil)
@@ -375,43 +378,38 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
   }
 
   private def getPictureForNotifications(userId: UserId, nots: Seq[NotificationData]): Future[Option[Bitmap]] =
-    if (nots.exists(_.ephemeral)) Future.successful(None)
-    else {
-      inject[AccountToUsersStorage].apply(userId).flatMap {
-        case Some(st) =>
-          for {
-            //TODO if a user doesn't have a picture, should we default to some bitmap?
-            assetId <- st.getAll(nots.map(_.user).toSet).map(_.flatten.flatMap(_.picture)).map { pictures =>
-              if (pictures.size == 1) pictures.headOption else None
-            }
-            bitmap <- {
-              val imageLoader   = inject[AccountToImageLoader]
-              val assetsStorage = inject[AccountToAssetsStorage]
+    if (nots.size == 1 && !nots.exists(_.ephemeral)) {
+      val result = for {
+        Some(storage) <- inject[AccountToUsersStorage].apply(userId)
+        user          <- storage.get(nots.head.user)
+        picture        = user.flatMap(_.picture)
+        bitmap        <- picture.fold(Future.successful(Option.empty[Bitmap]))(loadPicture)
+      } yield bitmap
 
-              Future.sequence(List(imageLoader(userId), assetsStorage(userId))).flatMap {
-                case Some(imageLoader: ImageLoader) :: Some(assetsStorage: AssetsStorage) :: Nil =>
-                  for {
-                    assetData <- assetId.fold(Future.successful(Option.empty[AssetData]))(assetsStorage.get)
-                    bmp       <- assetData.fold(Future.successful(Option.empty[Bitmap])){ ad =>
-                      imageLoader.loadBitmap(ad, BitmapRequest.Single(toPx(64)), forceDownload = false).map(Option(_)).withTimeout(500.millis).recoverWith {
-                        case _ : Throwable => CancellableFuture.successful(None)
-                      }.future
-                    }
-                  } yield
-                    bmp.map { original => Bitmap.fromAndroid(BitmapUtils.createRoundBitmap(original, toPx(64), 0, Color.TRANSPARENT)) }
-                case _ => Future.successful(None)
-              }
-            }
-          } yield bitmap
-        case _ => Future.successful(None)
+      result.recoverWith {
+        case ex: Exception =>
+          warn(l"Could not get avatar.", ex)
+          Future.successful(None)
       }
     }
+    else Future.successful(None)
+
+  private def loadPicture(picture: Picture): Future[Option[Bitmap]] = {
+    Threading.ImageDispatcher {
+      Option(WireGlide(cxt)
+        .asBitmap()
+        .load(picture)
+        .apply(new RequestOptions().circleCrop())
+        .submit(128, 128)
+        .get()).map(Bitmap.fromAndroid)
+    }.future
+  }
 
   private def getSound(ns: Seq[NotificationData]) = {
     if (soundController.soundIntensityNone) None
     else if (!soundController.soundIntensityFull && (ns.size > 1 && ns.lastOption.forall(_.msgType != KNOCK))) None
     else ns.map(_.msgType).lastOption.fold(Option.empty[Uri]) {
-      case ASSET | ANY_ASSET | VIDEO_ASSET | AUDIO_ASSET |
+      case IMAGE_ASSET | ANY_ASSET | VIDEO_ASSET | AUDIO_ASSET |
            LOCATION | TEXT | CONNECT_ACCEPTED | CONNECT_REQUEST | RENAME |
            LIKE  => Option(getSelectedSoundUri(soundController.currentTonePrefs._2, R.raw.new_message_gcm))
       case KNOCK => Option(getSelectedSoundUri(soundController.currentTonePrefs._3, R.raw.ping_from_them))
@@ -477,10 +475,10 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
 
       if (isSingleConv)
         specProps.copy(
-          openConvIntent           = Some((account, n.conv, requestBase)),
+          openConvIntent           = getOpenConvIntent(account, n, requestBase),
           clearNotificationsIntent = Some((account, Some(n.conv))),
-          action1                  = Some((account, n.conv, requestBase + 1, bundleEnabled)),
-          action2                  = Some((account, n.conv, requestBase + 2, bundleEnabled))
+          action1                  = getAction(account, n, requestBase, 1, bundleEnabled),
+          action2                  = getAction(account, n, requestBase, 2, bundleEnabled)
         )
       else
         specProps.copy(

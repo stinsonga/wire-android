@@ -28,7 +28,7 @@ import com.waz.service.AccountsService
 import com.waz.utils.NameParts
 import com.waz.utils.events.Signal
 import com.waz.zclient.common.controllers.UserAccountsController
-import com.waz.zclient.drawables.TeamIconDrawable
+import com.waz.zclient.common.drawables.TeamIconDrawable
 import com.waz.zclient.ui.views.CircleView
 import com.waz.zclient.utils.{RichView, UiStorage, UserSignal}
 import com.waz.zclient.{R, ViewHelper}
@@ -85,12 +85,9 @@ class ProfileAccountTab(val context: Context, val attrs: AttributeSet, val defSt
 
   private val accentColor = teamAndUser.map(tau => AccentColor(tau._1.accent).color)
 
-  private val picture = teamAndUser.map{
-    case (user, Some(team)) =>
-      // TODO use team icon when ready
-      Option.empty[AssetId]
-    case (user, _) =>
-      user.picture
+  private val picture = teamAndUser.map {
+    case (_, Some(team)) => team.picture
+    case (user, _) => user.picture
   }
 
   private val initials = teamAndUser.map {
@@ -98,9 +95,12 @@ class ProfileAccountTab(val context: Context, val attrs: AttributeSet, val defSt
     case (user, _) => user.displayName
   }.map(NameParts.maybeInitial(_).getOrElse(""))
 
-  private val drawableCorners = teamAndUser.map(_._2.fold(TeamIconDrawable.UserCorners)(_ => TeamIconDrawable.TeamCorners))
+  private val drawableCorners = teamAndUser.map {
+    case (_, Some(team)) => TeamIconDrawable.TeamShape
+    case (user, _) => TeamIconDrawable.UserShape
+  }
 
-  picture.onUi { drawable.assetId ! _ }
+  picture.onUi { picture => drawable.setPicture(picture) }
 
   accentColor.onUi { color =>
     unreadIndicator.setAccentColor(color)

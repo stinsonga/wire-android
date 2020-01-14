@@ -17,13 +17,12 @@
  */
 package com.waz.zclient.appentry
 
-import android.app.FragmentManager
 import android.content.res.Configuration
 import android.content.{Context, Intent}
 import android.os.Bundle
-import android.support.v4.app.FragmentManager.OnBackStackChangedListener
-import android.support.v4.app.{Fragment, FragmentTransaction}
 import android.view.View
+import androidx.fragment.app.{Fragment, FragmentManager, FragmentTransaction}
+import androidx.fragment.app.FragmentManager.OnBackStackChangedListener
 import com.waz.content.Preferences.Preference.PrefCodec
 import com.waz.service.AccountManager.ClientRegistrationState
 import com.waz.service.{AccountsService, GlobalModule}
@@ -46,7 +45,7 @@ import com.waz.zclient.log.LogUI._
 import com.waz.zclient.newreg.fragments.country.CountryController
 import com.waz.zclient.ui.text.{GlyphTextView, TypefaceTextView}
 import com.waz.zclient.ui.utils.KeyboardUtils
-import com.waz.zclient.utils.ContextUtils.{showConfirmationDialog, showErrorDialog}
+import com.waz.zclient.utils.ContextUtils.{showConfirmationDialog, showErrorDialog, showLogoutWarningIfNeeded}
 import com.waz.zclient.utils.{BackendController, ContextUtils, RichView, ViewUtils}
 import com.waz.zclient.views.LoadingIndicatorView
 
@@ -197,7 +196,7 @@ class AppEntryActivity extends BaseActivity {
               verbose(l"switched backend")
 
               // re-present fragment for updated ui.
-              getFragmentManager.popBackStackImmediate(AppLaunchFragment.Tag, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+              getSupportFragmentManager.popBackStackImmediate(AppLaunchFragment.Tag, FragmentManager.POP_BACK_STACK_INCLUSIVE)
               showFragment(AppLaunchFragment(), AppLaunchFragment.Tag, animated = false)
           }
         }
@@ -218,6 +217,12 @@ class AppEntryActivity extends BaseActivity {
 
       case _ =>
     }
+
+    userAccountsController.mostRecentLoggedOutAccount.onUi {
+      case Some((_, reason)) =>
+        showLogoutWarningIfNeeded(reason).foreach(_ => userAccountsController.mostRecentLoggedOutAccount ! None)
+      case None =>
+    }
   }
 
   // It is possible to open the app through intents with deep links. If that happens, we can't just
@@ -229,7 +234,7 @@ class AppEntryActivity extends BaseActivity {
     // if the SSO token is present we use it to log in the user
     userAccountsController.ssoToken.head.foreach {
       case Some(_) =>
-        getFragmentManager.popBackStackImmediate(AppLaunchFragment.Tag, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        getSupportFragmentManager.popBackStackImmediate(AppLaunchFragment.Tag, FragmentManager.POP_BACK_STACK_INCLUSIVE)
         showFragment(AppLaunchFragment(), AppLaunchFragment.Tag, animated = false)
       case _ =>
     }(Threading.Ui)

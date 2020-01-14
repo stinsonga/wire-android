@@ -32,8 +32,8 @@ import android.hardware.Camera.ShutterCallback;
 import android.os.Build;
 import android.os.PowerManager;
 import android.os.Vibrator;
-import android.support.v4.app.NotificationCompat;
-import android.support.v4.view.ViewCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.view.ViewCompat;
 import android.telephony.PhoneNumberUtils;
 import android.text.Html;
 import android.text.Spanned;
@@ -47,7 +47,6 @@ import static android.hardware.Camera.getNumberOfCameras;
 @SuppressWarnings("Deprecation")
 /*
  This class exists to facilitate fine-grained warning deprecation, not possible in Scala
- TODO(AN-5975): rewrite this class in Scala once we can include the silencer plugin
  */
 public class DeprecationUtils {
 
