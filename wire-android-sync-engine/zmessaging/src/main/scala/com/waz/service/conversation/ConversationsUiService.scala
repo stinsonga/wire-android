@@ -22,7 +22,6 @@ import com.waz.api.IConversation.{Access, AccessRole}
 import com.waz.api.Message
 import com.waz.api.NetworkMode.{OFFLINE, WIFI}
 import com.waz.api.impl._
-import com.waz.service.assets2._
 import com.waz.content._
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.log.LogSE._
@@ -34,7 +33,8 @@ import com.waz.model.sync.ReceiptType
 import com.waz.service.AccountsService.InForeground
 import com.waz.service.ZMessaging.currentBeDrift
 import com.waz.service._
-import com.waz.service.assets2.Asset.Video
+import com.waz.service.assets.{AES_CBC_Encryption, AssetService, ContentForUpload, UploadAsset}
+import com.waz.service.assets.Asset.Video
 import com.waz.service.conversation.ConversationsService.generateTempConversationId
 import com.waz.service.messages.{MessagesContentUpdater, MessagesService}
 import com.waz.service.tracking.TrackingService
@@ -61,6 +61,10 @@ trait ConversationsUiService {
                        content: ContentForUpload,
                        confirmation: WifiWarningConfirmation = DefaultConfirmation,
                        exp: Option[Option[FiniteDuration]] = None): Future[Some[MessageData]]
+  def sendAssetMessages(convId: ConvId,
+                        contents: Seq[ContentForUpload],
+                        confirmation: WifiWarningConfirmation = DefaultConfirmation,
+                        exp: Option[Option[FiniteDuration]] = None): Future[Unit]
 
   def sendLocationMessage(convId: ConvId, l: api.MessageContent.Location): Future[Some[MessageData]] //TODO remove use of MessageContent.Location
 
@@ -89,7 +93,7 @@ trait ConversationsUiService {
 
   //conversation creation methods
   def getOrCreateOneToOneConversation(other: UserId): Future[ConversationData]
-  def createGroupConversation(name:        Option[Name] = None,
+  def createGroupConversation(name:        Name,
                               members:     Set[UserId] = Set.empty,
                               teamOnly:    Boolean = false,
                               receiptMode: Int = 0,
@@ -162,7 +166,6 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
                                 content: ContentForUpload,
                                 confirmation: WifiWarningConfirmation = DefaultConfirmation,
                                 exp: Option[Option[FiniteDuration]] = None): Future[Some[MessageData]] = {
-    verbose(l"sendAssetMessage($convId, $content)")
     val messageId = MessageId()
     for {
       retention  <- messages.retentionPolicy2ById(convId)
@@ -176,6 +179,34 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
     } yield Some(message)
   }
 
+  override def sendAssetMessages(convId:       ConvId,
+                                 contents:     Seq[ContentForUpload],
+                                 confirmation: WifiWarningConfirmation = DefaultConfirmation,
+                                 exp:          Option[Option[FiniteDuration]] = None): Future[Unit] = {
+    val contentMap = contents.map { c => MessageId() -> c }.toMap
+    for {
+      retention <- messages.retentionPolicy2ById(convId)
+      rr        <- readReceiptSettings(convId)
+      rawAssets <- Future.traverse(contentMap) { case (messageId, content) =>
+                     assets.createAndSaveUploadAsset(content, AES_CBC_Encryption.random, public = false, retention, Some(messageId))
+                           .map(asset => messageId -> asset)
+                   }
+      assetMap  =  rawAssets.toMap
+      msgs      <- Future.traverse(assetMap) { case (messageId, rawAsset) =>
+                     messages.addAssetMessage(convId, messageId, rawAsset, rr, exp)
+                   }
+      _         <- updateLastRead(msgs.toList.maxBy(_.time))
+      msgMap    =  msgs.toIdMap
+      _         <- Future.traverse(assetMap) { case (messageId, rawAsset) =>
+                     val message = msgMap(messageId)
+                     checkSize(convId, rawAsset, message, confirmation).flatMap {
+                       case true  => sync.postMessage(message.id, convId, message.editTime)
+                       case false => Future.successful(())
+                     }
+                   }
+    } yield ()
+  }
+
   override def sendLocationMessage(convId: ConvId, l: api.MessageContent.Location): Future[Some[MessageData]] = {
     for {
       rr  <- readReceiptSettings(convId)
@@ -185,8 +216,7 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
     } yield Some(msg)
   }
 
-  override def updateMessage(convId: ConvId, id: MessageId, text: String, mentions: Seq[Mention] = Nil): Future[Option[MessageData]] = {
-    verbose(l"updateMessage($convId, $id, $mentions")
+  override def updateMessage(convId: ConvId, id: MessageId, text: String, mentions: Seq[Mention] = Nil): Future[Option[MessageData]] =
     messagesStorage.update(id, {
       case m if m.convId == convId && m.userId == selfUserId =>
         val (tpe, ct) = MessageData.messageContent(text, mentions, weblinkEnabled = true)
@@ -205,7 +235,6 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
       case Some((_, m)) => sync.postMessage(m.id, m.convId, m.editTime) map { _ => Some(m) } // using PostMessage sync request to use the same logic for failures and retrying
       case None => Future successful None
     }
-  }
 
   override def deleteMessage(convId: ConvId, id: MessageId): Future[Unit] = for {
     _ <- messagesContent.deleteOnUserRequest(Seq(id))
@@ -252,10 +281,13 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
 
   override def addConversationMembers(conv: ConvId, users: Set[UserId], defaultRole: ConversationRole): Future[Option[SyncId]] =
     (for {
-      true   <- canModifyMembers(conv)
-      added  <- members.updateOrCreateAll(conv, users.map(_ -> defaultRole).toMap) if added.nonEmpty
-      _      <- messages.addMemberJoinMessage(conv, selfUserId, added.map(_.userId))
-      syncId <- sync.postConversationMemberJoin(conv, added.map(_.userId), defaultRole)
+      true      <- canModifyMembers(conv)
+      contacted <- members.getByUsers(users)
+      toSync    =  users -- contacted.map(_.userId).toSet
+      _         <- sync.syncUsers(toSync) // data of users found through Search UI is not yet in db
+      added     <- members.updateOrCreateAll(conv, users.map(_ -> defaultRole).toMap) if added.nonEmpty
+      _         <- messages.addMemberJoinMessage(conv, selfUserId, added.map(_.userId))
+      syncId    <- sync.postConversationMemberJoin(conv, added.map(_.userId), defaultRole)
     } yield Option(syncId))
       .recover {
         case NonFatal(e) =>
@@ -265,10 +297,13 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
 
   override def removeConversationMember(conv: ConvId, user: UserId) = {
     (for {
-      true    <- canModifyMembers(conv)
-      Some(_) <- members.remove(conv, user)
-      _       <- messages.addMemberLeaveMessage(conv, selfUserId, user)
-      syncId  <- sync.postConversationMemberLeave(conv, user)
+      true     <- canModifyMembers(conv)
+      Some(_)  <- members.remove(conv, user)
+      toDelete <- if (user != selfUserId) members.getByUsers(Set(user)).map(_.isEmpty)
+                  else Future.successful(false)
+      _        <- if (toDelete) usersStorage.remove(user) else Future.successful(())
+      _        <- messages.addMemberLeaveMessage(conv, selfUserId, user)
+      syncId   <- sync.postConversationMemberLeave(conv, user)
     } yield Option(syncId))
       .recover {
         case NonFatal(e) =>
@@ -329,6 +364,7 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
                         remoteId    = u.conversation.getOrElse(RConvId()),
                         convType    = ConversationType.Incoming,
                         creator     = other,
+                        name        = None,
                         members     = Set(selfUserId),
                         hidden      = true,
                         defaultRole = ConversationRole.AdminRole
@@ -344,6 +380,7 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
                         remoteId    = RConvId(),
                         convType    = ConversationType.OneToOne,
                         creator     = selfUserId,
+                        name        = None,
                         members     = Set(other),
                         defaultRole = ConversationRole.AdminRole
                       )
@@ -383,13 +420,13 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
     }
   }
 
-  override def createGroupConversation(name:        Option[Name] = None,
+  override def createGroupConversation(name:        Name,
                                        members:     Set[UserId] = Set.empty,
                                        teamOnly:    Boolean = false,
                                        receiptMode: Int = 0,
                                        defaultRole: ConversationRole = ConversationRole.MemberRole
                                       ): Future[(ConversationData, SyncId)] =
-    createAndPostConversation(ConvId(), name, members, teamOnly, receiptMode, defaultRole)
+    createAndPostConversation(ConvId(), Some(name), members, teamOnly, receiptMode, defaultRole)
 
   private def createAndPostConversation(id:          ConvId,
                                         name:        Option[Name],
@@ -437,19 +474,25 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
     _   <- sync.postMessage(msg.id, id, msg.editTime)
   } yield Some(msg)
 
+  def shouldSendReadReceipts(convId: ConvId, readReceiptSettings: ReadReceiptSettings): Future[Boolean] =
+    convs.isGroupConversation(convId).map {
+      case true  => readReceiptSettings.convSetting.contains(1)
+      case false => readReceiptSettings.selfSettings
+    }
+
   override def setLastRead(convId: ConvId, msg: MessageData): Future[Option[ConversationData]] = {
     def sendReadReceipts(from: RemoteInstant, to: RemoteInstant, readReceiptSettings: ReadReceiptSettings): Future[Seq[SyncId]] = {
-      if (!readReceiptSettings.selfSettings && readReceiptSettings.convSetting.isEmpty) {
-        Future.successful(Seq())
-      } else {
-        messagesStorage.findMessagesBetween(convId, from, to).flatMap { messages =>
-          val msgs = messages.filter { m =>
-            m.userId != selfUserId && m.expectsRead.contains(true)
+      shouldSendReadReceipts(convId, readReceiptSettings).flatMap {
+        case true =>
+          messagesStorage.findMessagesBetween(convId, from, to).flatMap { messages =>
+            val msgs = messages.filter { m =>
+              m.userId != selfUserId && m.expectsRead.contains(true)
+            }
+            RichFuture.traverseSequential(msgs.groupBy(_.userId).toSeq)({ case (u, ms) if ms.nonEmpty =>
+              sync.postReceipt(convId, ms.map(_.id), u, ReceiptType.Read)
+            })
           }
-          RichFuture.traverseSequential(msgs.groupBy(_.userId).toSeq)( { case (u, ms) if ms.nonEmpty =>
-            sync.postReceipt(convId, ms.map(_.id), u, ReceiptType.Read)
-          })
-        }
+        case false => Future.successful(Seq())
       }
     }
 

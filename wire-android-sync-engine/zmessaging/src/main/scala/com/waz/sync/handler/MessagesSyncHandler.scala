@@ -25,13 +25,13 @@ import com.waz.content.{MembersStorage, MessagesStorage}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.log.LogSE._
 import com.waz.model.AssetData.{ProcessingTaskKey, UploadTaskKey}
-import com.waz.model.GenericContent.{Ephemeral, Knock, Location, MsgEdit}
+import com.waz.model.GenericContent.{ButtonAction, Ephemeral, Knock, Location, MsgEdit}
 import com.waz.model.GenericMessage.TextMessage
 import com.waz.model._
 import com.waz.model.errors._
 import com.waz.model.sync.ReceiptType
-import com.waz.service.assets2.Asset.{General, Image}
-import com.waz.service.assets2.{AssetService, _}
+import com.waz.service.assets.{AssetService, AssetStorage, PreviewEmpty, PreviewNotReady, PreviewNotUploaded, PreviewUploaded, UploadAsset, UploadAssetStatus, UploadAssetStorage}
+import com.waz.service.assets.Asset.{General, Image}
 import com.waz.service.conversation.ConversationsContentUpdater
 import com.waz.service.messages.{MessagesContentUpdater, MessagesService}
 import com.waz.service.otr.OtrClientsService
@@ -57,7 +57,6 @@ class MessagesSyncHandler(selfUserId: UserId,
                           otrSync:    OtrSyncHandler,
                           convs:      ConversationsContentUpdater,
                           storage:    MessagesStorage,
-                          assetSync:  AssetSyncHandler,
                           sync:       SyncServiceHandle,
                           assets:     AssetService,
                           assetStorage: AssetStorage,
@@ -80,7 +79,6 @@ class MessagesSyncHandler(selfUserId: UserId,
         successful(Failure("conversation not found"))
     }
 
-
   def postRecalled(convId: ConvId, msgId: MessageId, recalled: MessageId): Future[SyncResult] =
     convs.convById(convId) flatMap {
       case Some(conv) =>
@@ -97,7 +95,7 @@ class MessagesSyncHandler(selfUserId: UserId,
     }
 
   def postReceipt(convId: ConvId, msgs: Seq[MessageId], userId: UserId, tpe: ReceiptType): Future[SyncResult] =
-    convs.convById(convId) flatMap {
+    convs.convById(convId).flatMap {
       case Some(conv) =>
         val (msg, recipients) = tpe match {
           case ReceiptType.Delivery         => (GenericMessage(msgs.head.uid, Proto.DeliveryReceipt(msgs))(Proto.DeliveryReceipt), Set(userId))
@@ -106,10 +104,23 @@ class MessagesSyncHandler(selfUserId: UserId,
         }
 
         otrSync
-          .postOtrMessage(conv.id, msg, Some(recipients), nativePush = false)
+          .postOtrMessage(conv.id, msg, recipients = Some(recipients), nativePush = false)
           .map(SyncResult(_))
       case None =>
         successful(Failure("conversation not found"))
+    }
+
+  def postButtonAction(messageId: MessageId, buttonId: ButtonId, senderId: UserId): Future[SyncResult] =
+    storage.get(messageId).flatMap {
+      case None      => successful(Failure("message not found"))
+      case Some(msg) => for {
+        result <- otrSync.postOtrMessage(
+                    msg.convId,
+                    GenericMessage(Uid(), ButtonAction(buttonId.str, messageId.str)),
+                    recipients = Option(Set(senderId)),
+                    enforceIgnoreMissing = true)
+        _      <- result.fold(_ => service.setButtonError(messageId, buttonId), _ => Future.successful(()))
+      } yield SyncResult(result)
     }
 
   def postMessage(convId: ConvId, id: MessageId, editTime: RemoteInstant)(implicit info: RequestInfo): Future[SyncResult] =
@@ -315,7 +326,6 @@ class MessagesSyncHandler(selfUserId: UserId,
   }
 
   private[waz] def messageSent(convId: ConvId, msg: MessageData, time: RemoteInstant) = {
-    debug(l"otrMessageSent($convId. $msg, $time)")
 
     def updateLocalTimes(conv: ConvId, prevTime: RemoteInstant, time: RemoteInstant) =
       msgContent.updateLocalMessageTimes(conv, prevTime, time) flatMap { updated =>

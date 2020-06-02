@@ -33,25 +33,21 @@ import scala.concurrent.Future
 class LastReadSyncHandler(selfUserId: UserId,
                           convs: ConversationStorage,
                           metadata: MetaDataService,
-                          convSync: ConversationsSyncHandler,
                           msgsSync: MessagesSyncHandler,
                           otrSync: OtrSyncHandler) extends DerivedLogTag {
 
   import com.waz.threading.Threading.Implicits.Background
 
-  def postLastRead(convId: ConvId, time: RemoteInstant): Future[SyncResult] = {
-    verbose(l"postLastRead($convId, $time)")
-
+  def postLastRead(convId: ConvId, time: RemoteInstant): Future[SyncResult] =
     convs.get(convId).flatMap {
       case Some(conv) if conv.lastRead.isAfter(time) => // no need to send this msg as lastRead was already advanced
         Future.successful(Success)
       case Some(conv) =>
         val msg = GenericMessage(Uid(), LastRead(conv.remoteId, time))
         otrSync
-          .postOtrMessage(ConvId(selfUserId.str), msg)
+          .postOtrMessage(ConvId(selfUserId.str), msg, recipients = Some(Set(selfUserId)))
           .map(SyncResult(_))
       case None =>
         Future.successful(Failure(s"No conversation found for id: $convId"))
     }
-  }
 }

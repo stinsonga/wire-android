@@ -37,14 +37,6 @@ public interface IUserPreferencesController {
 
     void reset();
 
-    void setLastAccentColor(final int accentColor);
-
-    int getLastAccentColor();
-
-    boolean showContactsDialog();
-
-    String getDeviceId();
-
     void setVerificationCode(String code);
 
     void removeVerificationCode();

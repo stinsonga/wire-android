@@ -32,6 +32,7 @@ import com.waz.utils.{JsonDecoder, JsonEncoder, _}
 import org.json.JSONArray
 
 import scala.concurrent.duration._
+import scala.util.Try
 
 case class ConversationData(override val id:      ConvId                 = ConvId(),
                             remoteId:             RConvId                = RConvId(),
@@ -47,7 +48,7 @@ case class ConversationData(override val id:      ConvId                 = ConvI
                             archived:             Boolean                = false,
                             archiveTime:          RemoteInstant          = RemoteInstant.Epoch,
                             cleared:              Option[RemoteInstant]  = None,
-                            generatedName:        Name                   = Name.Empty,
+                            generatedName:        Name                   = Name.Empty, // deprecated
                             searchKey:            Option[SearchKey]      = None,
                             unreadCount:          UnreadCount            = UnreadCount(0, 0, 0, 0, 0),
                             failedCount:          Int                    = 0,
@@ -60,10 +61,9 @@ case class ConversationData(override val id:      ConvId                 = ConvI
                             access:               Set[Access]            = Set.empty,
                             accessRole:           Option[AccessRole]     = None, //option for migration purposes only - at some point we do a fetch and from that point it will always be defined
                             link:                 Option[Link]           = None,
-                            receiptMode:          Option[Int]            = None
+                            receiptMode:          Option[Int]            = None  //Some(1) if both users have RR enabled in a 1-to-1 convo
                            ) extends Identifiable[ConvId] {
-
-  def displayName = if (convType == ConversationType.Group) name.getOrElse(generatedName) else generatedName
+  def getName(): String = name.fold("")(_.str) // still used in Java
 
   def withFreshSearchKey = copy(searchKey = freshSearchKey)
   def savedOrFreshSearchKey = searchKey.orElse(freshSearchKey)
@@ -71,7 +71,7 @@ case class ConversationData(override val id:      ConvId                 = ConvI
 
   lazy val completelyCleared = cleared.exists(!_.isBefore(lastEventTime))
 
-  val isManaged = team.map(_ => false) //can be returned to parameter list when we need it.
+  lazy val isManaged = team.map(_ => false) //can be returned to parameter list when we need it.
 
   lazy val ephemeralExpiration: Option[EphemeralDuration] = (globalEphemeral, localEphemeral) match {
     case (Some(d), _) => Some(ConvExpiry(d)) //global ephemeral takes precedence over local
@@ -83,32 +83,32 @@ case class ConversationData(override val id:      ConvId                 = ConvI
 
   def withCleared(time: RemoteInstant) = copy(cleared = Some(cleared.fold(time)(_ max time)))
 
-  def isTeamOnly: Boolean = accessRole match {
+  val isTeamOnly: Boolean = accessRole match {
     case Some(TEAM) if access.contains(Access.INVITE) => true
     case _ => false
   }
 
-  def isGuestRoom: Boolean = accessRole match {
+  val isGuestRoom: Boolean = accessRole match {
     case Some(NON_ACTIVATED) if access == Set(Access.INVITE, Access.CODE) => true
     case _ => false
   }
 
-  def isWirelessLegacy: Boolean = !(isTeamOnly || isGuestRoom)
+  val isWirelessLegacy: Boolean = !(isTeamOnly || isGuestRoom)
 
   def isUserAllowed(userData: UserData): Boolean =
     !(userData.isGuest(team) && isTeamOnly)
 
   def isMemberFromTeamGuest(teamId: Option[TeamId]): Boolean = team.isDefined && teamId != team
 
-  def isAllAllowed: Boolean = muted.isAllAllowed
+  val isAllAllowed: Boolean = muted.isAllAllowed
 
-  def isAllMuted: Boolean = muted.isAllMuted
+  val isAllMuted: Boolean = muted.isAllMuted
 
-  def onlyMentionsAllowed: Boolean = muted.onlyMentionsAllowed
+  val onlyMentionsAllowed: Boolean = muted.onlyMentionsAllowed
 
-  def readReceiptsAllowed: Boolean = team.isDefined && receiptMode.exists(_ > 0)
+  val readReceiptsAllowed: Boolean = team.isDefined && receiptMode.exists(_ > 0)
 
-  def hasUnreadMessages: Boolean =
+  val hasUnreadMessages: Boolean =
     (isAllAllowed && unreadCount.total > 0) || (onlyMentionsAllowed && (unreadCount.mentions > 0 || unreadCount.quotes > 0))
 }
 
@@ -218,7 +218,7 @@ object ConversationData {
     val Hidden              = bool('hidden)(_.hidden)
     val MissedCall          = opt(id[MessageId]('missed_call))(_.missedCallMessage)
     val IncomingKnock       = opt(id[MessageId]('incoming_knock))(_.incomingKnockMessage)
-    val Verified            = text[Verification]('verified, _.name, Verification.valueOf)(_.verified)
+    val Verified            = text[Verification]('verified, _.name, getVerification)(_.verified)
     val LocalEphemeral      = opt(finiteDuration('ephemeral))(_.localEphemeral)
     val GlobalEphemeral     = opt(finiteDuration('global_ephemeral))(_.globalEphemeral)
     val Access              = set[Access]('access, JsonEncoder.encodeAccess(_).toString(), v => JsonDecoder.array[Access](new JSONArray(v), (arr: JSONArray, i: Int) => IConversation.Access.valueOf(arr.getString(i).toUpperCase)).toSet)(_.access)
@@ -227,6 +227,9 @@ object ConversationData {
     val UnreadMentionsCount = int('unread_mentions_count)(_.unreadCount.mentions)
     val UnreadQuotesCount   = int('unread_quote_count)(_.unreadCount.quotes)
     val ReceiptMode         = opt(int('receipt_mode))(_.receiptMode)
+
+    private def getVerification(name: String): Verification =
+      Try(Verification.valueOf(name)).getOrElse(Verification.UNKNOWN)
 
     override val idCol = Id
     override val table = Table(
@@ -311,10 +314,10 @@ object ConversationData {
          | WHERE (${ConvType.name} = ${ConvType(ConversationType.OneToOne)} OR ${ConvType.name} = ${ConvType(ConversationType.Group)})
          |   AND ${IsActive.name} = ${IsActive(true)}
          |   AND ${Hidden.name} = 0
-      """.stripMargin, null))
+      """.stripMargin))
 
     def allConversations(implicit db: DB) =
-      db.rawQuery(s"SELECT *, ${ConvType.name} = ${Self.id} as is_self, ${ConvType.name} = ${Incoming.id} as is_incoming, ${Archived.name} = 1 as is_archived FROM ${table.name} WHERE ${Hidden.name} = 0 ORDER BY is_self DESC, is_archived ASC, is_incoming DESC, ${LastEventTime.name} DESC", null)
+      db.rawQuery(s"SELECT *, ${ConvType.name} = ${Self.id} as is_self, ${ConvType.name} = ${Incoming.id} as is_incoming, ${Archived.name} = 1 as is_archived FROM ${table.name} WHERE ${Hidden.name} = 0 ORDER BY is_self DESC, is_archived ASC, is_incoming DESC, ${LastEventTime.name} DESC")
 
     import ConversationMemberData.{ConversationMemberDataDao => CM}
     import UserData.{UserDataDao => U}
@@ -345,7 +348,7 @@ object ConversationData {
            | HAVING COUNT(*) > 2
          """.stripMargin)
 
-      list(db.rawQuery(select + " " + handleCondition + teamCondition.map(qu => s" $qu").getOrElse(""), null))
+      list(db.rawQuery(select + " " + handleCondition + teamCondition.map(qu => s" $qu").getOrElse("")))
     }
 
     def findByTeams(teams: Set[TeamId])(implicit db: DB) = iteratingMultiple(findInSet(Team, teams.map(Option(_))))

@@ -23,13 +23,12 @@ import com.waz.content.GlobalPreferences.AutoAnswerCallPrefKey
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.{ConvId, UserId}
 import com.waz.permissions.PermissionsService
-import com.waz.service.ZMessaging
+import com.waz.service.{AccountsService, NetworkModeService, ZMessaging}
 import com.waz.service.call.CallInfo.CallState
 import com.waz.threading.Threading
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.zclient._
 import com.waz.zclient.common.controllers.global.AccentColorController
-import com.waz.zclient.conversation.ConversationController
 import com.waz.zclient.log.LogUI._
 import com.waz.zclient.utils.ContextUtils.{getString, showConfirmationDialog, showErrorDialog, showPermissionsErrorDialog}
 import com.waz.zclient.utils.PhoneUtils
@@ -80,7 +79,7 @@ class CallStartController(implicit inj: Injector, cxt: WireContext, ec: EventCon
       for {
         curCallZms        <- callingZmsOpt.head
         curCall           <- currentCallOpt.head
-        Some(newCallZms)  <- accounts.getZms(account)
+        Some(newCallZms)  <- inject[AccountsService].getZms(account)
         Some(newCallConv) <- newCallZms.convsStorage.get(conv)
         ongoingCalls      <- newCallZms.calling.joinableCalls.head
         acceptingCall     =  curCall.exists(c => c.convId == conv && c.selfParticipant.userId == account) //the call we're trying to start is the same as the current one
@@ -106,7 +105,7 @@ class CallStartController(implicit inj: Injector, cxt: WireContext, ec: EventCon
         _                 = verbose(l"curWithVideo: $curWithVideo")
         color             <- inject[AccentColorController].accentColor.head
         true              <-
-          networkMode.head.flatMap {        //check network state, proceed if okay
+          inject[NetworkModeService].networkMode.head.flatMap {        //check network state, proceed if okay
             case NetworkMode.OFFLINE              => showErrorDialog(R.string.alert_dialog__no_network__header, R.string.calling__call_drop__message).map(_ => false)
             case NetworkMode._2G                  => showErrorDialog(R.string.calling__slow_connection__title, R.string.calling__slow_connection__message).map(_ => false)
             case NetworkMode.EDGE if curWithVideo =>
@@ -117,7 +116,7 @@ class CallStartController(implicit inj: Injector, cxt: WireContext, ec: EventCon
               )
             case _                                => Future.successful(true)
           }
-        members           <- inject[ConversationController].loadMembers(newCallConv.id)
+        members           <- newCallZms.conversations.convMembers(newCallConv.id).head
         true              <-
           if (members.size > 5 && !acceptingCall && !isJoiningCall) //!acceptingCall is superfluous, but here for clarity
             showConfirmationDialog(
@@ -131,7 +130,8 @@ class CallStartController(implicit inj: Injector, cxt: WireContext, ec: EventCon
             Future.successful(true)
         hasPerms          <- inject[PermissionsService].requestAllPermissions(if (curWithVideo) ListSet(CAMERA, RECORD_AUDIO) else ListSet(RECORD_AUDIO)) //check or request permissions
         _                 <-
-          if (hasPerms) newCallZms.calling.startCall(newCallConv.id, curWithVideo, forceOption)
+          if (hasPerms)
+            newCallZms.calling.startCall(newCallConv.id, curWithVideo, forceOption)
           else showPermissionsErrorDialog(
             R.string.calling__cannot_start__title,
             if (curWithVideo) R.string.calling__cannot_start__no_camera_permission__message else R.string.calling__cannot_start__no_permission__message

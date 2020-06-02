@@ -17,21 +17,19 @@
  */
 package com.waz.zclient.conversationlist.adapters
 
-import androidx.recyclerview.widget.{DiffUtil, RecyclerView}
+import android.content.Context
 import android.view.{View, ViewGroup}
-import com.waz.content.UsersStorage
+import androidx.recyclerview.widget.{DiffUtil, RecyclerView}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
-import com.waz.model.{ConvId, ConversationData, FolderId, TeamId}
-import com.waz.service.TeamSizeThreshold
-import com.waz.utils.events.{EventContext, EventStream, Signal, SourceStream}
+import com.waz.model.{ConvId, ConversationData, FolderId, Name}
+import com.waz.utils.events.{EventContext, EventStream, SourceStream}
 import com.waz.utils.returning
+import com.waz.zclient.conversationlist.ConversationListController.NamedConversation
 import com.waz.zclient.conversationlist.adapters.ConversationListAdapter.{ConversationRowViewHolder, _}
 import com.waz.zclient.conversationlist.views.{ConversationFolderListRow, ConversationListRow, IncomingConversationListRow, NormalConversationListRow}
 import com.waz.zclient.log.LogUI._
 import com.waz.zclient.pages.main.conversationlist.views.ConversationCallback
 import com.waz.zclient.{Injectable, Injector, R, ViewHelper}
-import android.content.Context
-import com.waz.threading.Threading
 
 import scala.collection.mutable.ListBuffer
 
@@ -43,15 +41,11 @@ abstract class ConversationListAdapter (implicit context: Context, eventContext:
 
   setHasStableIds(true)
 
-  private lazy val usersStorage = inject[Signal[UsersStorage]]
-  private lazy val teamId = inject[Signal[Option[TeamId]]]
-
   val onConversationClick: SourceStream[ConvId] = EventStream[ConvId]()
   val onConversationLongClick: SourceStream[ConversationData] = EventStream[ConversationData]()
 
   protected val items = new ListBuffer[Item]
   protected var maxAlpha = 1.0f
-  private var hideStatus = false
 
   def setMaxAlpha(maxAlpha: Float): Unit = {
     this.maxAlpha = maxAlpha
@@ -64,12 +58,9 @@ abstract class ConversationListAdapter (implicit context: Context, eventContext:
     * @param newItems the new data source.
     */
   protected def updateList(newItems: List[Item]): Unit = {
-    TeamSizeThreshold.shouldHideStatus(teamId, usersStorage).foreach { hide =>
-      hideStatus = hide
-      DiffUtil.calculateDiff(new DiffCallback(items.toList, newItems), false).dispatchUpdatesTo(this)
-      items.clear()
-      items.appendAll(newItems)
-    }(Threading.Ui)
+    DiffUtil.calculateDiff(new DiffCallback(items.toList, newItems), false).dispatchUpdatesTo(this)
+    items.clear()
+    items.appendAll(newItems)
   }
 
   override def getItemCount: Int = items.size
@@ -81,9 +72,9 @@ abstract class ConversationListAdapter (implicit context: Context, eventContext:
   }
 
   override def getItemId(position: Int): Long = items(position) match {
-    case Item.IncomingRequests(first, _)  => first.str.hashCode
-    case Item.Header(id, _, _, _)         => id.str.hashCode
-    case Item.Conversation(data, section) => (data.id.str + section.getOrElse("")).hashCode
+    case Item.IncomingRequests(first, _)     => first.str.hashCode
+    case Item.Header(id, _, _, _)            => id.str.hashCode
+    case Item.Conversation(data, _, section) => (data.id.str + section.getOrElse("")).hashCode
   }
 
   override def onCreateViewHolder(parent: ViewGroup, viewType: Int): ConversationRowViewHolder = viewType match {
@@ -100,7 +91,7 @@ abstract class ConversationListAdapter (implicit context: Context, eventContext:
       case (header: Item.Header, viewHolder: ConversationFolderRowViewHolder) =>
         viewHolder.bind(header, isFirst = position == 0)
       case (conversation: Item.Conversation, viewHolder: NormalConversationRowViewHolder) =>
-        viewHolder.bind(conversation, hideStatus)
+        viewHolder.bind(conversation)
       case _ =>
         error(l"Invalid view holder/data pair")
     }
@@ -108,13 +99,13 @@ abstract class ConversationListAdapter (implicit context: Context, eventContext:
 
   override def onClick(position: Int): Unit = items(position) match {
     case Item.IncomingRequests(first, _) => onConversationClick ! first
-    case Item.Conversation(data, _)      => onConversationClick ! data.id
+    case Item.Conversation(conv, _, _)   => onConversationClick ! conv.id
     case _                               =>
   }
 
   override def onLongClick(position: Int): Boolean = items(position) match {
-    case Item.Conversation(data, _) =>
-      onConversationLongClick ! data
+    case Item.Conversation(conv, _, _) =>
+      onConversationLongClick ! conv
       true
     case _ =>
       false
@@ -143,11 +134,19 @@ object ConversationListAdapter {
       }
     }
 
-    case class Conversation(data: ConversationData, sectionTitle: Option[String] = None) extends Item {
+    case class Conversation(conv: ConversationData, name: Name, sectionTitle: Option[String]) extends Item {
       override val contentDescription: String = {
         val prefix = sectionTitle.map { t => s"$t: "}.getOrElse("")
-        prefix + data.displayName.str
+        prefix + name.str
       }
+    }
+
+    object Conversation {
+      def apply(namedConversation: NamedConversation): Conversation =
+        Conversation(namedConversation.conv, namedConversation.name, None)
+
+      def apply(namedConversation: NamedConversation, title: String): Conversation =
+        Conversation(namedConversation.conv, namedConversation.name, Some(title))
     }
 
     case class IncomingRequests(first: ConvId, numberOfRequests: Int) extends Item {
@@ -170,8 +169,8 @@ object ConversationListAdapter {
   class NormalConversationRowViewHolder(row: NormalConversationListRow, listener: RowClickListener)
     extends ConversationRowViewHolder(row, listener) {
 
-    def bind(item: Item.Conversation, hideStatus: Boolean): Unit = {
-      row.setConversation(item.data, hideStatus)
+    def bind(item: Item.Conversation): Unit = {
+      row.setConversation(item.conv, item.name)
       row.setContentDescription(item.contentDescription)
     }
   }
@@ -243,7 +242,7 @@ object ConversationListAdapter {
         case (lhs: Header, rhs: Header) =>
           lhs.id == rhs.id
         case (lhs: Conversation, rhs: Conversation) =>
-          lhs.data.id == rhs.data.id && lhs.sectionTitle == rhs.sectionTitle
+          lhs.conv.id == rhs.conv.id && lhs.sectionTitle == rhs.sectionTitle
         case (_: IncomingRequests, _: IncomingRequests) =>
           true
         case _ =>
@@ -255,8 +254,8 @@ object ConversationListAdapter {
       (oldList(oldItemPosition), newList(newItemPosition)) match {
         case (Header(_, title, isExpanded, oldCount), Header(_, newTitle, newIsExpanded, newCount)) =>
           title == newTitle && isExpanded && newIsExpanded && oldCount == newCount
-        case (Conversation(data, _), Conversation(newData, _)) =>
-          data == newData
+        case (Conversation(conv, name, _), Conversation(newConv, newName, _)) =>
+          conv == newConv && name == newName
         case (IncomingRequests(_, requests), IncomingRequests(_, newRequests)) =>
           requests == newRequests
         case _ =>

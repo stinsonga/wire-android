@@ -42,10 +42,9 @@ import com.waz.log._
 import com.waz.model._
 import com.waz.permissions.PermissionsService
 import com.waz.service._
-import com.waz.service.assets2._
+import com.waz.service.assets.{AssetDetailsService, AssetPreviewService, AssetService, AssetStorage, UriHelper}
 import com.waz.service.call.GlobalCallingService
-import com.waz.service.conversation.{ConversationsService, ConversationsUiService, FoldersService, SelectedConversationService}
-import com.waz.service.images.ImageLoader
+import com.waz.service.conversation.{ConversationsContentUpdater, ConversationsService, ConversationsUiService, FoldersService, SelectedConversationService}
 import com.waz.service.messages.MessagesService
 import com.waz.service.teams.TeamsService
 import com.waz.service.tracking.TrackingService
@@ -59,7 +58,7 @@ import com.waz.utils.SafeBase64
 import com.waz.utils.events.{EventContext, Signal}
 import com.waz.utils.wrappers.GoogleApi
 import com.waz.zclient.appentry.controllers.{CreateTeamController, InvitationsController}
-import com.waz.zclient.assets2.{AndroidImageRecoder, AndroidUriHelper, AssetDetailsServiceImpl, AssetPreviewServiceImpl}
+import com.waz.zclient.assets.{AndroidUriHelper, AssetDetailsServiceImpl, AssetPreviewServiceImpl}
 import com.waz.zclient.calling.controllers.{CallController, CallStartController}
 import com.waz.zclient.camera.controllers.{AndroidCameraFactory, GlobalCameraController}
 import com.waz.zclient.collection.controllers.CollectionController
@@ -68,7 +67,6 @@ import com.waz.zclient.common.controllers.global.{AccentColorController, Clients
 import com.waz.zclient.controllers._
 import com.waz.zclient.controllers.camera.ICameraController
 import com.waz.zclient.controllers.confirmation.IConfirmationController
-import com.waz.zclient.controllers.deviceuser.IDeviceUserController
 import com.waz.zclient.controllers.globallayout.IGlobalLayoutController
 import com.waz.zclient.controllers.location.ILocationController
 import com.waz.zclient.controllers.navigation.INavigationController
@@ -108,7 +106,6 @@ object WireApplication extends DerivedLogTag {
     if (Option(APP_INSTANCE).isEmpty) false // too early
     else APP_INSTANCE.ensureInitialized()
 
-  type AccountToImageLoader = (UserId) => Future[Option[ImageLoader]]
   type AccountToAssetsStorage = (UserId) => Future[Option[AssetStorage]]
   type AccountToUsersStorage = (UserId) => Future[Option[UsersStorage]]
   type AccountToConvsStorage = (UserId) => Future[Option[ConversationStorage]]
@@ -163,7 +160,6 @@ object WireApplication extends DerivedLogTag {
     bind [CustomBackendClient]            to inject[GlobalModule].customBackendClient
 
     import com.waz.threading.Threading.Implicits.Background
-    bind [AccountToImageLoader]   to (userId => inject[AccountsService].getZms(userId).map(_.map(_.imageLoader)))
     bind [AccountToAssetsStorage] to (userId => inject[AccountsService].getZms(userId).map(_.map(_.assetsStorage)))
     bind [AccountToUsersStorage]  to (userId => inject[AccountsService].getZms(userId).map(_.map(_.usersStorage)))
     bind [AccountToConvsStorage]  to (userId => inject[AccountsService].getZms(userId).map(_.map(_.convsStorage)))
@@ -177,10 +173,10 @@ object WireApplication extends DerivedLogTag {
 
     // services  and storages of the current zms
     bind [Signal[ConversationsService]]          to inject[Signal[ZMessaging]].map(_.conversations)
+    bind [Signal[ConversationsContentUpdater]]   to inject[Signal[ZMessaging]].map(_.convsContent)
     bind [Signal[SelectedConversationService]]   to inject[Signal[ZMessaging]].map(_.selectedConv)
     bind [Signal[ConversationsUiService]]        to inject[Signal[ZMessaging]].map(_.convsUi)
     bind [Signal[UserService]]                   to inject[Signal[ZMessaging]].map(_.users)
-    bind [Signal[TeamSizeThreshold]]             to inject[Signal[ZMessaging]].map(_.teamSize)
     bind [Signal[UserSearchService]]             to inject[Signal[ZMessaging]].map(_.userSearch)
     bind [Signal[ConversationStorage]]           to inject[Signal[ZMessaging]].map(_.convsStorage)
     bind [Signal[UsersStorage]]                  to inject[Signal[ZMessaging]].map(_.usersStorage)
@@ -190,7 +186,6 @@ object WireApplication extends DerivedLogTag {
     bind [Signal[AssetStorage]]                  to inject[Signal[ZMessaging]].map(_.assetsStorage)
     bind [Signal[AssetService]]                  to inject[Signal[ZMessaging]].map(_.assetService)
     bind [Signal[MessagesStorage]]               to inject[Signal[ZMessaging]].map(_.messagesStorage)
-    bind [Signal[ImageLoader]]                   to inject[Signal[ZMessaging]].map(_.imageLoader)
     bind [Signal[MessagesService]]               to inject[Signal[ZMessaging]].map(_.messages)
     bind [Signal[IntegrationsService]]           to inject[Signal[ZMessaging]].map(_.integrations)
     bind [Signal[UserPreferences]]               to inject[Signal[ZMessaging]].map(_.userPrefs)
@@ -203,6 +198,8 @@ object WireApplication extends DerivedLogTag {
     bind [Signal[FoldersService]]                to inject[Signal[ZMessaging]].map(_.foldersService)
     bind [Signal[TeamsService]]                  to inject[Signal[ZMessaging]].map(_.teams)
     bind [Signal[MessageIndexStorage]]           to inject[Signal[ZMessaging]].map(_.messagesIndexStorage)
+    bind [Signal[ConnectionService]]             to inject[Signal[ZMessaging]].map(_.connection)
+    bind [Signal[ButtonsStorage]]                to inject[Signal[ZMessaging]].map(_.buttonsStorage)
 
     // old controllers
     // TODO: remove controller factory, reimplement those controllers
@@ -213,7 +210,6 @@ object WireApplication extends DerivedLogTag {
     bind [IUserPreferencesController]    toProvider controllerFactory.getUserPreferencesController
     bind [ISingleImageController]        toProvider controllerFactory.getSingleImageController
     bind [ISlidingPaneController]        toProvider controllerFactory.getSlidingPaneController
-    bind [IDeviceUserController]         toProvider controllerFactory.getDeviceUserController
     bind [IGlobalLayoutController]       toProvider controllerFactory.getGlobalLayoutController
     bind [ILocationController]           toProvider controllerFactory.getLocationController
     bind [ICameraController]             toProvider controllerFactory.getCameraController
@@ -432,13 +428,6 @@ class WireApplication extends MultiDexApplication with WireContext with Injectab
         new AssetDetailsServiceImpl(uriHelper)(getApplicationContext, Threading.IO)
       override def assetPreviewService: AssetPreviewService =
         new AssetPreviewServiceImpl()(getApplicationContext, Threading.IO)
-
-      override def assetsTransformationsService: AssetTransformationsService =
-        new AssetTransformationsServiceImpl(
-          List(
-            new ImageDownscalingCompressing(new AndroidImageRecoder)
-          )
-        )
     }
 
     ZMessaging.onCreate(

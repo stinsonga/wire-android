@@ -43,6 +43,7 @@ case class ErrorResponse(code: Int, message: String, label: String) extends Thro
 object ErrorResponse {
 
   val Forbidden = 403
+  val NotFound = 404
   val InternalErrorCode = 499
   val CancelledCode = 498
   val UnverifiedCode = 497
@@ -80,6 +81,8 @@ object ErrorResponse {
           ErrorResponse(response.code, label = "Decoding error", message = s"Decoding body error: $err")
         case HttpClient.ConnectionError(err) =>
           ErrorResponse(ErrorResponse.ConnectionErrorCode, message = s"connection error: $err", label = "")
+        case HttpClient.UnknownServiceError(ex) =>
+          ErrorResponse.InternalError.copy(message = s"Unknown service exception: $ex")
         case HttpClient.UnknownError(err) =>
           ErrorResponse.InternalError.copy(message = s"Unknown error: $err")
       }

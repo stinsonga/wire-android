@@ -21,21 +21,20 @@ import java.net.URI
 
 import android.app.Activity
 import android.content.Context
-import android.graphics.Bitmap
+import android.graphics.{Bitmap, BitmapFactory}
 import com.waz.api
 import com.waz.api.{IConversation, Verification}
-import com.waz.content.{ConversationStorage, MembersStorage, OtrClientsStorage, UsersStorage}
+import com.waz.content.{ConversationStorage, OtrClientsStorage}
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.ConversationData.ConversationType
 import com.waz.model._
 import com.waz.model.otr.Client
-import com.waz.service.assets2.{Content, ContentForUpload, UriHelper}
-import com.waz.service.conversation.{ConversationsService, ConversationsUiService, SelectedConversationService}
 import com.waz.service.AccountManager
+import com.waz.service.assets.{AssetInput, Content, ContentForUpload, UriHelper}
+import com.waz.service.conversation.{ConversationsService, ConversationsUiService, SelectedConversationService}
 import com.waz.threading.{CancellableFuture, SerialDispatchQueue, Threading}
 import com.waz.utils.events.{EventContext, EventStream, Signal, SourceStream}
 import com.waz.utils.{Serialized, returning, _}
-import com.waz.zclient.assets2.ImageCompressUtils
 import com.waz.zclient.calling.controllers.CallStartController
 import com.waz.zclient.common.controllers.global.AccentColorController
 import com.waz.zclient.conversation.ConversationController.ConversationChange
@@ -43,8 +42,8 @@ import com.waz.zclient.conversationlist.adapters.ConversationFolderListAdapter.F
 import com.waz.zclient.conversationlist.{ConversationListController, FolderStateController}
 import com.waz.zclient.core.stores.conversation.ConversationChangeRequester
 import com.waz.zclient.log.LogUI._
+import com.waz.zclient.utils.Callback
 import com.waz.zclient.utils.ContextUtils._
-import com.waz.zclient.utils.{Callback, currentRotation, rotate}
 import com.waz.zclient.{Injectable, Injector, R}
 import org.threeten.bp.Instant
 
@@ -61,8 +60,6 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   private lazy val convsUi               = inject[Signal[ConversationsUiService]]
   private lazy val conversations         = inject[Signal[ConversationsService]]
   private lazy val convsStorage          = inject[Signal[ConversationStorage]]
-  private lazy val membersStorage        = inject[Signal[MembersStorage]]
-  private lazy val usersStorage          = inject[Signal[UsersStorage]]
   private lazy val otrClientsStorage     = inject[Signal[OtrClientsStorage]]
   private lazy val account               = inject[Signal[Option[AccountManager]]]
   private lazy val callStart             = inject[CallStartController]
@@ -70,6 +67,8 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   private lazy val uriHelper             = inject[UriHelper]
   private lazy val accentColorController = inject[AccentColorController]
   private lazy val selfId                = inject[Signal[UserId]]
+
+  val DefaultDeletedName: Name = Name(getString(R.string.default_deleted_username))
 
   private var lastConvId = Option.empty[ConvId]
 
@@ -95,21 +94,27 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
     convs   <- conversations.head
     selfId  <- selfId.head
     conv    <- getConversation(convId)
-    isGroup <- convs.groupConversation(convId).head
+    isGroup <- convs.isGroupConversation(convId)
   } yield isGroup && conv.exists(_.creator == selfId)
 
+  def conversationName(convId: ConvId): Signal[Name] =
+    for {
+      conversations <- conversations
+      name          <- conversations.conversationName(convId)
+    } yield
+      if (name.isEmpty) DefaultDeletedName
+      else name
+
   val currentConvType: Signal[ConversationType] = currentConv.map(_.convType).disableAutowiring()
-  val currentConvName: Signal[String] = currentConv.map(_.displayName).map {
-    case Name.Empty => getString(R.string.default_deleted_username)
-    case name => name
-  } // the name of the current conversation can be edited (without switching)
+  val currentConvName: Signal[Name] = currentConvId.flatMap(conversationName).disableAutowiring()
+    // the name of the current conversation can be edited (without switching)
 
   val currentConvIsVerified: Signal[Boolean] = currentConv.map(_.verified == Verification.VERIFIED)
   val currentConvIsGroup: Signal[Boolean] =
     for {
       convs   <- conversations
-      convId  <- currentConvId
-      isGroup <- convs.groupConversation(convId)
+      convId  <- currentConvIdOpt
+      isGroup <- convId.fold(Signal.const(false))(convs.groupConversation)
     } yield isGroup
 
   val currentConvIsTeamOnly: Signal[Boolean] = currentConv.map(_.isTeamOnly)
@@ -127,9 +132,9 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
     } yield members
 
   def convMembers(convId: ConvId): Signal[Map[UserId, ConversationRole]] = for {
-    convs          <- conversations
-    members        <- convs.activeMembersData(convId)
-  } yield members.map(m => m.userId -> ConversationRole.getRole(m.role)).toMap
+    convs   <- conversations
+    members <- convs.convMembers(convId)
+  } yield members
 
   lazy val selfRole: Signal[ConversationRole] =
     for {
@@ -151,7 +156,6 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
   currentConvIdOpt {
     case Some(convId) =>
-      conversations.head.foreach(_.forceNameUpdate(convId, getString(R.string.default_deleted_username)))
       if (!lastConvId.contains(convId)) { // to only catch changes coming from SE (we assume it's an account switch)
         verbose(l"a conversation change bypassed selectConv: last = $lastConvId, current = $convId")
         convChanged ! ConversationChange(from = lastConvId, to = Option(convId), requester = ConversationChangeRequester.ACCOUNT_CHANGE)
@@ -197,20 +201,11 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   def groupConversation(id: ConvId): Signal[Boolean] =
     conversations.flatMap(_.groupConversation(id))
 
-  def participantsIds(conv: ConvId): Future[Seq[UserId]] =
-    membersStorage.head.flatMap(_.getActiveUsers(conv))
-
   def setEphemeralExpiration(expiration: Option[FiniteDuration]): Future[Unit] =
     for {
       id <- currentConvId.head
       _  <- convsUi.head.flatMap(_.setEphemeral(id, expiration))
     } yield ()
-
-  def loadMembers(convId: ConvId): Future[Seq[UserData]] =
-    for {
-      userIds <- membersStorage.head.flatMap(_.getActiveUsers(convId)) // TODO: maybe switch to ConversationsMembersSignal
-      users   <- usersStorage.head.flatMap(_.listAll(userIds))
-    } yield users
 
   def loadClients(userId: UserId): Future[Seq[Client]] =
     otrClientsStorage.head.flatMap(_.getClients(userId)) // TODO: move to SE maybe?
@@ -247,20 +242,22 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
   // NOTE: Rotating makes sense only for images, but at this point we accept any content. If it's
   // not an image, `currentRotation` will return 0 and the method will return the original content.
-  def rotateImageIfNeeded(image: Content): Future[Content] = {
-    def rotateIfNeeded(image: Content, path: String): Future[Try[Content]] = {
-      val rotation = currentRotation(path)
-      if (rotation == 0) Future.successful(Success(image))
-      // rotation and compression is time-consuming - better not to do it on the Ui thread
-      else Future { rotate(path, rotation).map(ImageCompressUtils.toJpg) }(Threading.ImageDispatcher)
-    }
-
+  def rotateImageIfNeeded(image: Content): Future[Content] =
     (image match {
       case Content.Uri(uri)      => rotateIfNeeded(image, uri.getPath)
       case Content.File(_, file) => rotateIfNeeded(image, file.getPath)
       case _                     => Future.successful(Success(image))
     }).map(_.getOrElse(image))
-  }
+
+  // rotation and compression are time-consuming - better not to do it on the Ui thread
+  private def rotateIfNeeded(image: Content, path: String): Future[Try[Content]] = Future {
+    import AssetInput._
+    val cr = currentRotation(path)
+    if (cr == 0)
+      Success(image)
+    else
+      Try(BitmapFactory.decodeFile(path, BitmapOptions)).map { bmp => toJpg(rotate(bmp, cr)) }
+  }(Threading.ImageDispatcher)
 
   private def sendAssetMessage(convs:    Seq[ConvId],
                                content:  ContentForUpload,
@@ -276,7 +273,7 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
   def sendAssetMessage(bitmap: Bitmap, assetName: String): Future[Option[MessageData]] =
     for {
-      img     <- Future { ImageCompressUtils.toJpg(bitmap) }(Threading.Background)
+      img     <- Future { AssetInput.toJpg(bitmap) }(Threading.Background)
       content =  ContentForUpload(assetName, img)
       data    <- convsUiwithCurrentConv((ui, id) => ui.sendAssetMessage(id, content))
     } yield data
@@ -290,6 +287,17 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
       msg     <- if (convs.isEmpty) sendAssetMessage(content, activity, exp)
                  else sendAssetMessage(convs, content, activity, exp).map(_.head)
     } yield msg
+
+  def sendAssetMessages(uris:    Seq[URI],
+                       activity: Activity,
+                       exp:      Option[Option[FiniteDuration]],
+                       convs:    Seq[ConvId]): Future[Unit] =
+    for {
+      ui       <- convsUi.head
+      color    <- accentColorController.accentColor.head
+      contents <- Future.traverse(uris) { uri => Future.fromTry(uriHelper.extractFileName(uri).map(ContentForUpload(_,  Content.Uri(uri)))) }
+      _        <- Future.traverse(convs) { id => ui.sendAssetMessages(id, contents, (s: Long) => showWifiWarningDialog(s, color), exp) }
+    } yield ()
 
   def sendMessage(location: api.MessageContent.Location): Future[Option[MessageData]] =
     convsUiwithCurrentConv((ui, id) => ui.sendLocationMessage(id, location))
@@ -305,10 +313,10 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
     for {
       service     <- convsUi.head
       id          <- currentConvId.head
-      currentName <- currentConv.map(_.displayName).head
+      currentName <- currentConvName.head
     } yield {
       val newName = Name(name)
-      if (newName != currentName) service.setConversationName(id, newName)
+      if (!currentName.contains(newName)) service.setConversationName(id, newName)
     }
 
   def setCurrentConvReadReceipts(readReceiptsEnabled: Boolean): Future[Unit] =
@@ -336,8 +344,9 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
 
   def setCurrentConversationToNext(requester: ConversationChangeRequester): Future[Unit] = {
     def nextConversation(convId: ConvId): Future[Option[ConvId]] =
-      convListController.regularConversationListData.head.map {
-        regular => regular.lift(regular.indexWhere(_.id == convId) + 1).map(_.id)
+      convListController.regularConversationListData.head.map { regular =>
+        val r = regular.map(_.conv)
+        r.lift(r.indexWhere(_.id == convId) + 1).map(_.id)
       } (Threading.Background)
 
     for {
@@ -364,9 +373,9 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
   }
 
   def createGuestRoom(): Future[ConversationData] =
-    createGroupConversation(Some(context.getString(R.string.guest_room_name)), Set.empty, false, false)
+    createGroupConversation(context.getString(R.string.guest_room_name), Set.empty, false, false)
 
-  def createGroupConversation(name:         Option[Name],
+  def createGroupConversation(name:         Name,
                               userIds:      Set[UserId],
                               teamOnly:     Boolean,
                               readReceipts: Boolean,
@@ -377,7 +386,7 @@ class ConversationController(implicit injector: Injector, context: Context, ec: 
     (conv, _) <- convsUi.createGroupConversation(name, userIds, teamOnly, if (readReceipts) 1 else 0, defaultRole)
   } yield conv
 
-  def withCurrentConvName(callback: Callback[String]): Unit = currentConvName.head.foreach(callback.callback)(Threading.Ui)
+  def withCurrentConvName(callback: Callback[String]): Unit = currentConvName.head.map(_.str).foreach(callback.callback)(Threading.Ui)
 
   def getCurrentConvId: ConvId = currentConvId.currentValue.orNull
   def withConvLoaded(convId: ConvId, callback: Callback[ConversationData]): Unit = getConversation(convId).foreach {

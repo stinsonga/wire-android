@@ -28,13 +28,9 @@ import com.waz.model.otr.ClientId
 import com.waz.threading.Threading
 import com.waz.utils.returning
 import com.waz.zclient.common.controllers.UserAccountsController
-import com.waz.zclient.connect.{PendingConnectRequestFragment, SendConnectRequestFragment}
 import com.waz.zclient.controllers.singleimage.ISingleImageController
-import com.waz.zclient.conversation.ConversationController
-import com.waz.zclient.core.stores.conversation.ConversationChangeRequester
 import com.waz.zclient.integrations.IntegrationDetailsFragment
 import com.waz.zclient.log.LogUI._
-import com.waz.zclient.pages.main.connect.BlockedUserProfileFragment
 import com.waz.zclient.pages.main.conversation.controller.{ConversationScreenControllerObserver, IConversationScreenController}
 import com.waz.zclient.participants.ConversationOptionsMenuController.Mode
 import com.waz.zclient.participants.{ConversationOptionsMenuController, OptionsMenu, ParticipantsController, UserRequester}
@@ -42,16 +38,13 @@ import com.waz.zclient.ui.utils.KeyboardUtils
 import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.views.DefaultPageTransitionAnimation
 import com.waz.zclient.{FragmentHelper, ManagerFragment, R}
-import com.waz.api.User.ConnectionStatus._
+import com.waz.api.ConnectionStatus._
+import com.waz.zclient.messages.UsersController
+import com.waz.zclient.utils.ContextUtils
 
 import scala.concurrent.Future
 
-class ParticipantFragment extends ManagerFragment
-  with ConversationScreenControllerObserver
-  with SendConnectRequestFragment.Container
-  with BlockedUserProfileFragment.Container
-  with PendingConnectRequestFragment.Container {
-
+class ParticipantFragment extends ManagerFragment with ConversationScreenControllerObserver {
   import ParticipantFragment._
 
   implicit def ctx: Context = getActivity
@@ -62,7 +55,7 @@ class ParticipantFragment extends ManagerFragment
   private lazy val bodyContainer             = view[View](R.id.fl__participant__container)
   private lazy val participantsContainerView = view[View](R.id.ll__participant__container)
 
-  private lazy val convController         = inject[ConversationController]
+  private lazy val usersController        = inject[UsersController]
   private lazy val participantsController = inject[ParticipantsController]
   private lazy val screenController       = inject[IConversationScreenController]
   private lazy val singleImageController  = inject[ISingleImageController]
@@ -120,7 +113,15 @@ class ParticipantFragment extends ManagerFragment
     participantsContainerView
 
     participantsController.onShowUser {
-      case Some(userId) => showUser(userId)
+      case Some(userId) =>
+        usersController.syncUserAndCheckIfDeleted(userId).foreach {
+          case (Some(user), None) =>
+            ContextUtils.showToast(getString(R.string.participant_was_removed_from_team, user.name.str))
+          case (None, None) =>
+            warn(l"Trying to show a non-existing user with id $userId")
+          case _ =>
+            showUser(userId)
+        }
       case _ =>
     }
   }
@@ -245,17 +246,21 @@ class ParticipantFragment extends ManagerFragment
       case Some(user) if user.connection == ACCEPTED || user.expiresAt.isDefined || isTeamMember =>
         openUserProfileFragment(SingleParticipantFragment.newInstance(), SingleParticipantFragment.Tag)
 
-      case Some(user) if user.connection == PENDING_FROM_OTHER || user.connection == PENDING_FROM_USER || user.connection == IGNORED =>
-        import com.waz.zclient.connect.PendingConnectRequestFragment._
+      case Some(user) if user.connection == PENDING_FROM_USER || user.connection == IGNORED =>
+        import PendingConnectRequestFragment._
         openUserProfileFragment(newInstance(userId, UserRequester.PARTICIPANTS), Tag)
 
+      case Some(user) if user.connection == PENDING_FROM_OTHER =>
+        import ConnectRequestFragment._
+        openUserProfileFragment(newInstance(userId,UserRequester.PARTICIPANTS), Tag)
+
       case Some(user) if user.connection == BLOCKED =>
-        import BlockedUserProfileFragment._
-        openUserProfileFragment(newInstance(userId.str, UserRequester.PARTICIPANTS), Tag)
+        import BlockedUserFragment._
+        openUserProfileFragment(newInstance(userId, UserRequester.PARTICIPANTS), Tag)
 
       case Some(user) if user.connection == CANCELLED || user.connection == UNCONNECTED =>
-        import com.waz.zclient.connect.SendConnectRequestFragment._
-        openUserProfileFragment(newInstance(userId.str, UserRequester.PARTICIPANTS), Tag)
+        import SendConnectRequestFragment._
+        openUserProfileFragment(newInstance(userId, UserRequester.PARTICIPANTS), Tag)
       case _ =>
     }
   }
@@ -263,29 +268,6 @@ class ParticipantFragment extends ManagerFragment
   override def onHideUser(): Unit = if (screenController.isShowingUser) {
     getChildFragmentManager.popBackStack()
   }
-
-  override def showRemoveConfirmation(userId: UserId): Unit =
-    participantsController.showRemoveConfirmation(userId)
-
-  override def dismissUserProfile(): Unit = screenController.hideUser()
-
-  override def dismissSingleUserProfile(): Unit = dismissUserProfile()
-
-  override def onAcceptedConnectRequest(userId: UserId): Unit = {
-    screenController.hideUser()
-    verbose(l"onAcceptedConnectRequest $userId")
-    userAccountsController.getConversationId(userId).flatMap { convId =>
-      convController.selectConv(convId, ConversationChangeRequester.START_CONVERSATION)
-    }
-  }
-
-  override def onUnblockedUser(restoredConversationWithUser: ConvId): Unit = {
-    screenController.hideUser()
-    verbose(l"onUnblockedUser $restoredConversationWithUser")
-    convController.selectConv(restoredConversationWithUser, ConversationChangeRequester.START_CONVERSATION)
-  }
-
-  override def onConnectRequestWasSentToUser(): Unit = screenController.hideUser()
 
   override def onHideOtrClient(): Unit = getChildFragmentManager.popBackStack()
 

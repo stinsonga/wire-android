@@ -27,8 +27,8 @@ import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model._
 import com.waz.permissions.PermissionsService
 import com.waz.service.ZMessaging
-import com.waz.service.assets2.Asset.Image
-import com.waz.service.assets2.AssetService
+import com.waz.service.assets.AssetService
+import com.waz.service.assets.Asset.Image
 import com.waz.service.messages.MessageAndLikes
 import com.waz.threading.CancellableFuture
 import com.waz.utils._
@@ -45,6 +45,7 @@ import com.waz.zclient.participants.OptionsMenu
 import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.ExternalFileSharing
 import com.waz.zclient.{ClipboardUtils, Injectable, Injector, R}
+import com.waz.zclient.log.LogUI._
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -125,7 +126,7 @@ class MessageActionsController(implicit injector: Injector, ctx: Context, ec: Ev
   private def copyMessage(message: MessageData) =
     zms.head.flatMap(_.usersStorage.get(message.userId)) foreach {
       case Some(user) =>
-        val clip = ClipData.newPlainText(getString(R.string.conversation__action_mode__copy__description, user.getDisplayName), message.contentString)
+        val clip = ClipData.newPlainText(getString(R.string.conversation__action_mode__copy__description, user.name), message.contentString)
         clipboard.setPrimaryClip(clip)
         Toast.makeText(context, R.string.conversation__action_mode__copy__toast, Toast.LENGTH_SHORT).show()
       case None =>
@@ -201,7 +202,7 @@ class MessageActionsController(implicit injector: Injector, ctx: Context, ec: Ev
         intentBuilder.startChooser()
 
       case Failure(err) =>
-        // TODO: show error info
+        error(l"Asset $id is not for sharing", err)
         dialog.dismiss()
     }
   }

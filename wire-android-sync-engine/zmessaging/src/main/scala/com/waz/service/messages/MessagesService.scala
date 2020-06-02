@@ -27,16 +27,16 @@ import com.waz.model.ConversationData.ConversationType
 import com.waz.model.GenericContent._
 import com.waz.model.{Mention, MessageId, _}
 import com.waz.service._
-import com.waz.service.assets2.UploadAsset
+import com.waz.service.assets.UploadAsset
 import com.waz.service.conversation.ConversationsContentUpdater
 import com.waz.service.otr.VerificationStateUpdater.{ClientUnverified, MemberAdded, VerificationChange}
 import com.waz.sync.SyncServiceHandle
-import com.waz.sync.client.AssetClient2
+import com.waz.sync.client.AssetClient
 import com.waz.threading.{CancellableFuture, Threading}
 import com.waz.utils.RichFuture.traverseSequential
 import com.waz.utils._
 import com.waz.utils.crypto.ReplyHashing
-import com.waz.utils.events.{EventContext, EventStream}
+import com.waz.utils.events.{EventContext, EventStream, RefreshingSignal, Signal}
 
 import scala.collection.breakOut
 import scala.concurrent.Future
@@ -75,6 +75,7 @@ trait MessagesService {
 
   def retryMessageSending(conv: ConvId, msgId: MessageId): Future[Option[SyncId]]
   def updateMessageState(convId: ConvId, messageId: MessageId, state: Message.Status): Future[Option[MessageData]]
+  def markMessageRead(convId: ConvId, id: MessageId): Future[Option[MessageData]]
 
   def recallMessage(convId: ConvId, msgId: MessageId, userId: UserId, systemMsgId: MessageId = MessageId(), time: RemoteInstant, state: Message.Status = Message.Status.PENDING): Future[Option[MessageData]]
   def applyMessageEdit(convId: ConvId, userId: UserId, time: RemoteInstant, gm: GenericMessage): Future[Option[MessageData]]
@@ -83,25 +84,30 @@ trait MessagesService {
 
   def messageSent(convId: ConvId, msgId: MessageId, newTime: RemoteInstant): Future[Option[MessageData]]
   def messageDeliveryFailed(convId: ConvId, msg: MessageData, error: ErrorResponse): Future[Option[MessageData]]
-  def retentionPolicy2ById(convId: ConvId): Future[AssetClient2.Retention]
-  def retentionPolicy2(convData: ConversationData): Future[AssetClient2.Retention]
+  def retentionPolicy2ById(convId: ConvId): Future[AssetClient.Retention]
+  def retentionPolicy2(convData: ConversationData): Future[AssetClient.Retention]
 
   def findMessageIds(convId: ConvId): Future[Set[MessageId]]
 
   def getAssetIds(messageIds: Set[MessageId]): Future[Set[GeneralAssetId]]
+
+  def buttonsForMessage(msgId: MessageId): Signal[Seq[ButtonData]]
+  def clickButton(messageId: MessageId, buttonId: ButtonId): Future[Unit]
+  def setButtonError(messageId: MessageId, buttonId: ButtonId): Future[Unit]
 }
 
-class MessagesServiceImpl(selfUserId:   UserId,
-                          teamId:       Option[TeamId],
-                          replyHashing: ReplyHashing,
-                          storage:      MessagesStorage,
-                          updater:      MessagesContentUpdater,
-                          edits:        EditHistoryStorage,
-                          convs:        ConversationsContentUpdater,
-                          network:      NetworkModeService,
-                          members:      MembersStorage,
-                          usersStorage: UsersStorage,
-                          sync:         SyncServiceHandle) extends MessagesService with DerivedLogTag {
+class MessagesServiceImpl(selfUserId:      UserId,
+                          teamId:          Option[TeamId],
+                          replyHashing:    ReplyHashing,
+                          storage:         MessagesStorage,
+                          updater:         MessagesContentUpdater,
+                          edits:           EditHistoryStorage,
+                          convs:           ConversationsContentUpdater,
+                          network:         NetworkModeService,
+                          members:         MembersStorage,
+                          usersStorage:    UsersStorage,
+                          buttonsStorage:  ButtonsStorage,
+                          sync:            SyncServiceHandle) extends MessagesService with DerivedLogTag {
   import Threading.Implicits.Background
   private implicit val ec = EventContext.Global
 
@@ -240,8 +246,8 @@ class MessagesServiceImpl(selfUserId:   UserId,
                                asset: UploadAsset,
                                expectsReadReceipt: ReadReceiptSettings = AllDisabled,
                                exp: Option[Option[FiniteDuration]] = None): Future[MessageData] = {
-    import assets2.Asset
     import com.waz.model.GenericContent.{Asset => GenericAsset}
+    import com.waz.service.assets.Asset
 
     val tpe = asset.details match {
       case _: Asset.Image => Message.Type.IMAGE_ASSET
@@ -448,7 +454,7 @@ class MessagesServiceImpl(selfUserId:   UserId,
   override def addSuccessfulCallMessage(convId: ConvId, from: UserId, time: RemoteInstant, duration: FiniteDuration) =
     updater.addMessage(MessageData(MessageId(), convId, Message.Type.SUCCESSFUL_CALL, from, time = time, duration = Some(duration)))
 
-  def messageDeliveryFailed(convId: ConvId, msg: MessageData, error: ErrorResponse): Future[Option[MessageData]] =
+  override def messageDeliveryFailed(convId: ConvId, msg: MessageData, error: ErrorResponse): Future[Option[MessageData]] =
     updateMessageState(convId, msg.id, Message.Status.FAILED) andThen {
       case Success(Some(m)) => storage.onMessageFailed ! (m, error)
     }
@@ -456,15 +462,17 @@ class MessagesServiceImpl(selfUserId:   UserId,
   override def updateMessageState(convId: ConvId, messageId: MessageId, state: Message.Status) =
     updater.updateMessage(messageId) { _.copy(state = state) }
 
-  def markMessageRead(convId: ConvId, id: MessageId) =
-    if (!network.isOnlineMode) CancellableFuture.successful(None)
-    else
-      updater.updateMessage(id) { msg =>
-        if (msg.state == Status.FAILED) msg.copy(state = Status.FAILED_READ)
-        else msg
-      }
+  override def markMessageRead(convId: ConvId, id: MessageId): Future[Option[MessageData]] =
+    network.isOnline.head.flatMap {
+      case false => Future.successful(None)
+      case true =>
+        updater.updateMessage(id) { msg =>
+          if (msg.state == Status.FAILED) msg.copy(state = Status.FAILED_READ)
+          else msg
+        }
+    }
 
-  override def retentionPolicy2ById(convId: ConvId): Future[AssetClient2.Retention] =
+  override def retentionPolicy2ById(convId: ConvId): Future[AssetClient.Retention] =
     convs.convById(convId).flatMap {
       case Some(c) => retentionPolicy2(c)
       case None =>
@@ -472,8 +480,8 @@ class MessagesServiceImpl(selfUserId:   UserId,
         Future.failed(new IllegalArgumentException(s"No conversation with id $convId found"))
     }
 
-  override def retentionPolicy2(convData: ConversationData): Future[AssetClient2.Retention] = {
-    import AssetClient2.Retention
+  override def retentionPolicy2(convData: ConversationData): Future[AssetClient.Retention] = {
+    import AssetClient.Retention
 
     if (teamId.isDefined || convData.team.isDefined) {
       members
@@ -492,4 +500,24 @@ class MessagesServiceImpl(selfUserId:   UserId,
   override def findMessageIds(convId: ConvId): Future[Set[MessageId]] = storage.findMessageIds(convId)
 
   override def getAssetIds(messageIds: Set[MessageId]): Future[Set[GeneralAssetId]] = storage.getAssetIds(messageIds)
+
+  override def buttonsForMessage(msgId: MessageId): Signal[Seq[ButtonData]] = RefreshingSignal[Seq[ButtonData]](
+    loader       = CancellableFuture.lift(buttonsStorage.findByMessage(msgId).map(_.sortBy(_.ordinal))),
+    refreshEvent = EventStream.union(buttonsStorage.onChanged.map(_.map(_.id)), buttonsStorage.onDeleted)
+  )
+
+  override def clickButton(messageId: MessageId, buttonId: ButtonId): Future[Unit] =
+    for {
+      Some(msg)      <- storage.get(messageId)
+      isSenderActive <- members.isActiveMember(msg.convId, msg.userId)
+      _              <- if (isSenderActive)
+                          buttonsStorage.update((messageId, buttonId), _.copy(state = ButtonData.ButtonWaiting))
+                        else
+                          setButtonError(messageId, buttonId)
+      _              <- if (isSenderActive) sync.postButtonAction(messageId, buttonId, msg.userId) else Future.successful(())
+    } yield ()
+
+  override def setButtonError(messageId: MessageId, buttonId: ButtonId): Future[Unit] =
+    buttonsStorage.update((messageId, buttonId), _.copy(state = ButtonData.ButtonError))
+      .flatMap(_ => Future.successful(()))
 }

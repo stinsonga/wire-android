@@ -27,17 +27,20 @@ import android.widget.{ImageView, LinearLayout}
 import com.bumptech.glide.request.RequestOptions
 import com.waz.content.UserPreferences
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
-import com.waz.model.Picture
 import com.waz.model.otr.Client
-import com.waz.model.{AccentColor, Availability, UserPermissions}
+import com.waz.model.{AccentColor, Availability, Picture, UserPermissions}
 import com.waz.service.tracking.TrackingService
 import com.waz.service.{AccountsService, ZMessaging}
 import com.waz.threading.Threading
 import com.waz.utils.events.{EventContext, EventStream, Signal}
+import com.waz.zclient.BuildConfig.ACCOUNT_CREATION_ENABLED
 import com.waz.zclient._
-import com.waz.zclient.glide.WireGlide
+import com.waz.zclient.appentry.AppEntryActivity
 import com.waz.zclient.common.controllers.{BrowserController, UserAccountsController}
+import com.waz.zclient.feature.settings.main.SettingsMainActivity
+import com.waz.zclient.glide.WireGlide
 import com.waz.zclient.messages.UsersController
+import com.waz.zclient.preferences.pages.ProfileViewController.MaxAccountsCount
 import com.waz.zclient.preferences.views.TextButton
 import com.waz.zclient.tracking.OpenedManageTeam
 import com.waz.zclient.ui.text.TypefaceTextView
@@ -45,10 +48,6 @@ import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.Time.TimeStamp
 import com.waz.zclient.utils.{BackStackKey, BackStackNavigator, RichView, StringUtils, UiStorage, UserSignal}
 import com.waz.zclient.views.AvailabilityView
-import ProfileViewController.MaxAccountsCount
-import BuildConfig.ACCOUNT_CREATION_ENABLED
-import com.waz.zclient.appentry.AppEntryActivity
-import com.waz.zclient.settings.main.SettingsMainActivity
 
 trait ProfileView {
   val onDevicesDialogAccept: EventStream[Unit]
@@ -99,18 +98,16 @@ class ProfileViewImpl(context: Context, attrs: AttributeSet, style: Int) extends
     newTeamButton.setVisible(true)
     newTeamButton.onClickEvent.on(Threading.Ui) { _ =>
       // We want to go directly to the landing page.
-      val intent = new Intent(getContext, classOf[AppEntryActivity])
-      getContext.startActivity(intent)
+      getContext.startActivity(AppEntryActivity.newIntent(getContext))
     }
   } else {
     newTeamButton.setVisible(false)
   }
 
   settingsButton.onClickEvent.on(Threading.Ui) { _ =>
-    if (BuildConfig.KOTLIN_SETTINGS_MIGRATION) {
-      getContext.startActivity(new Intent(getContext, classOf[SettingsMainActivity])
-        .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-      )
+    if (BuildConfig.KOTLIN_SETTINGS) {
+      getContext.startActivity(SettingsMainActivity.newIntent(getContext)
+        .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
     } else {
         navigator.goTo(SettingsBackStackKey())
     }
@@ -276,7 +273,7 @@ class ProfileViewController(view: ProfileView)(implicit inj: Injector, ec: Event
   self.on(Threading.Ui) { self =>
     view.setAccentColor(AccentColor(self.accent).color)
     self.handle.foreach(handle => view.setHandle(StringUtils.formatHandle(handle.string)))
-    view.setUserName(self.getDisplayName)
+    view.setUserName(self.name)
   }
 
   for {

@@ -65,7 +65,10 @@ class ConversationOptionsMenuController(convId: ConvId, mode: Mode, fromDeepLink
   override val selectedItems: Signal[Set[MenuItem]] = Signal.const(Set())
   override val title: Signal[Option[String]] =
     if (mode.inConversationList)
-      Signal.future(convController.getConversation(convId).map(_.map(_.displayName)))
+      convController.conversationName(convId).map {
+        case name if name.isEmpty => None
+        case name                 => Some(name.str)
+      }
     else
       Signal.const(None)
 
@@ -102,11 +105,11 @@ class ConversationOptionsMenuController(convId: ConvId, mode: Mode, fromDeepLink
     selfRole             <- convController.selfRoleInConv(convId)
     isCurrentUserCreator <- Signal.future(convController.isCurrentUserCreator(convId))
     selectedParticipant  <- participantsController.selectedParticipant
-    favoriteConvIds      <- convListController.favoriteConversations.map(convs => convs.map(_.id))
+    favoriteConvIds      <- convListController.favoriteConversations.map(_.map(_.conv.id).toSet)
     customFolderId       <- Signal.future(convListController.getCustomFolderId(convId))
     customFolderData     <- customFolderId.fold(Signal.const[Option[FolderData]](None))(convListController.folder)
   } yield {
-    import com.waz.api.User.ConnectionStatus._
+    import com.waz.api.ConnectionStatus._
 
     val builder = Set.newBuilder[MenuItem]
 
@@ -146,7 +149,7 @@ class ConversationOptionsMenuController(convId: ConvId, mode: Mode, fromDeepLink
           if (conv.isActive) builder += Leave
           if (mode.inConversationList || teamId.isEmpty) builder += notifications
           builder += Clear
-          if (!inConversationList && isCurrentUserCreator && selfRole.canDeleteGroup) builder += DeleteGroupConv
+          if (!inConversationList && isCurrentUserCreator && teamId.isDefined && selfRole.canDeleteGroup) builder += DeleteGroupConv
         } else {
           if (teamMember || connectStatus.contains(ACCEPTED) || isBot) {
             builder ++= Set(notifications, Clear)
@@ -259,13 +262,9 @@ class ConversationOptionsMenuController(convId: ConvId, mode: Mode, fromDeepLink
           .setMessage(getString(R.string.confirmation_menu__block_text_with_name, displayName))
           .setNegativeButton(R.string.confirmation_menu__confirm_block, new DialogInterface.OnClickListener {
             override def onClick(dialog: DialogInterface, which: Int): Unit = {
-              zMessaging.head.flatMap(_.connection.blockConnection(userId)).map { _ =>
-                if (!mode.inConversationList || curConvId.contains(convId))
-                  convController.setCurrentConversationToNext(ConversationChangeRequester.BLOCK_USER)
-
-                if (!mode.inConversationList) {
-                  screenController.hideUser()
-                }
+              participantsController.blockUser(userId).map { _ =>
+                convController.leave(convId)
+                switchToConversationList()
               }(Threading.Ui)
             }
           }).create

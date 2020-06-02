@@ -28,9 +28,10 @@ import com.waz.log.LogShow
 import com.waz.model.errors.NotFoundLocal
 import com.waz.model.{AccountData, AssetId, Mime, Sha256, UploadAssetId}
 import com.waz.service.AccountsService
+import com.waz.service.assets._
 import com.waz.sync.SyncServiceHandle
-import com.waz.sync.client.AssetClient2.{FileWithSha, Retention}
-import com.waz.sync.client.{AssetClient2, AssetClient2Impl}
+import com.waz.sync.client.AssetClient.{FileWithSha, Retention}
+import com.waz.sync.client.{AssetClient, AssetClientImpl}
 import com.waz.threading.CancellableFuture
 import com.waz.utils.{IoUtils, ReactiveStorageImpl2, UnlimitedInMemoryStorage, returning}
 import com.waz.{AuthenticationConfig, FilesystemUtils, ZIntegrationMockSpec}
@@ -48,11 +49,10 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
   private val rawAssetStorage     = mock[UploadAssetStorage]
   private val assetDetailsService = mock[AssetDetailsService]
   private val restrictionsService      = mock[AssetRestrictionsService]
-  private val transformationsService      = mock[AssetTransformationsService]
   private val previewService      = mock[AssetPreviewService]
   private val cache               = mock[AssetContentCache]
   private val rawCache            = mock[UploadAssetContentCache]
-  private val client              = mock[AssetClient2]
+  private val client              = mock[AssetClient]
   private val uriHelperMock       = mock[UriHelper]
   private val syncHandle          = mock[SyncServiceHandle]
 
@@ -60,6 +60,7 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
   override val accountStorage: AccountStorage = mock[AccountStorage]
 
   private val testAssetContent = returning(Array.ofDim[Byte](128))(Random.nextBytes)
+  private def inputStream = new ByteArrayInputStream(testAssetContent)
 
   lazy private val testAsset = Asset(
     id = AssetId(),
@@ -76,14 +77,13 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
   )
 
   private def service(rawAssetStorage: UploadAssetStorage = rawAssetStorage,
-                      client: AssetClient2 = client): AssetService =
+                      client: AssetClient = client): AssetService =
     new AssetServiceImpl(
       assetStorage,
       rawAssetStorage,
       inProgressAssetStorage,
       assetDetailsService,
       previewService,
-      transformationsService,
       restrictionsService,
       uriHelperMock,
       cache,
@@ -112,8 +112,7 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
       (cache.getStream _).expects(*).once().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
 
       for {
-        result <- service().loadContent(testAsset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        bytes <- service().loadContent(testAsset, callback = None).future.flatMap(ai => Future.fromTry(ai.toByteArray))
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -137,8 +136,7 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
       (cache.getStream _).expects(*).once().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
 
       for {
-        result <- service().loadContent(testAsset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        bytes <- service().loadContent(testAsset, callback = None).future.flatMap(ai => Future.fromTry(ai.toByteArray))
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -149,8 +147,7 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
       (cache.getStream _).expects(*).once().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
 
       for {
-        result <- service().loadContent(testAsset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        bytes <- service().loadContent(testAsset, callback = None).future.flatMap(ai => Future.fromTry(ai.toByteArray))
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -161,16 +158,16 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
         testAsset.copy(localSource = Some(LocalSource(new URI("www.test"), Sha256.calculate(testAssetContent))))
 
       (assetStorage.find _).expects(*).once().returns(Future.successful(Some(asset)))
+      (uriHelperMock.assetInput _).expects(*).anyNumberOfTimes().onCall { _: URI => AssetStream(inputStream) }
       (uriHelperMock.openInputStream _)
         .expects(*)
-        .once()
+        .anyNumberOfTimes()
         .onCall({ _: URI =>
           Success(new ByteArrayInputStream(testAssetContent))
         })
 
       for {
-        result <- service().loadContent(asset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        bytes <- service().loadContent(asset, callback = None).future.flatMap(ai => Future.fromTry(ai.toByteArray))
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -186,19 +183,18 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
         FileWithSha(file, Sha256.calculate(testAssetContent))
       }
 
-      (assetStorage.find _).expects(*).once().returns(Future.successful(Some(asset)))
-      (uriHelperMock.openInputStream _).expects(*).once().returns(Failure(new IllegalArgumentException))
-      (assetStorage.save _).expects(asset.copy(localSource = None)).once().returns(Future.successful(()))
+      (assetStorage.find _).expects(*).anyNumberOfTimes().returns(Future.successful(Some(asset)))
+      (uriHelperMock.assetInput _).expects(*).anyNumberOfTimes().onCall { _: URI => AssetFailure(new IllegalArgumentException) }
+      (assetStorage.save _).expects(asset.copy(localSource = None)).anyNumberOfTimes().returns(Future.successful(()))
       (client.loadAssetContent _)
         .expects(asset, *)
-        .once()
+        .anyNumberOfTimes()
         .returns(CancellableFuture.successful(Right(downloadAssetResult)))
-      (cache.put _).expects(*, *, *).once().returns(Future.successful(()))
-      (cache.getStream _).expects(*).once().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
+      (cache.put _).expects(*, *, *).anyNumberOfTimes().returns(Future.successful(()))
+      (cache.getStream _).expects(*).anyNumberOfTimes().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
 
       for {
-        result <- service().loadContent(asset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        bytes <- service().loadContent(asset, callback = None).future.flatMap(ai => Future.fromTry(ai.toByteArray))
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -214,23 +210,24 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
         FileWithSha(file, testContentSha)
       }
 
-      (assetStorage.find _).expects(*).once().returns(Future.successful(Some(asset)))
+      (assetStorage.find _).expects(*).anyNumberOfTimes().returns(Future.successful(Some(asset)))
       //emulating file changing
+      (uriHelperMock.assetInput _).expects(*).anyNumberOfTimes().onCall { _: URI => AssetStream(new ByteArrayInputStream(testAssetContent :+ 1.toByte)) }
       (uriHelperMock.openInputStream _)
         .expects(*)
-        .once()
+        .anyNumberOfTimes()
         .returns(Success(new ByteArrayInputStream(testAssetContent :+ 1.toByte)))
-      (assetStorage.save _).expects(asset.copy(localSource = None)).once().returns(Future.successful(()))
+      (assetStorage.save _).expects(asset.copy(localSource = None)).anyNumberOfTimes().returns(Future.successful(()))
       (client.loadAssetContent _)
         .expects(asset, *)
-        .once()
+        .anyNumberOfTimes()
         .returns(CancellableFuture.successful(Right(downloadAssetResult)))
-      (cache.put _).expects(*, *, *).once().returns(Future.successful(()))
-      (cache.getStream _).expects(*).once().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
+      (cache.put _).expects(*, *, *).anyNumberOfTimes().returns(Future.successful(()))
+      (cache.getStream _).expects(*).anyNumberOfTimes().returns(Future.successful(new ByteArrayInputStream(testAssetContent)))
 
       for {
-        result <- service().loadContent(asset, callback = None)
-        bytes = IoUtils.toByteArray(result)
+        ai    <- service().loadContent(asset, callback = None).future
+        bytes <- Future.fromTry(ai.toByteArray)
       } yield {
         bytes shouldBe testAssetContent
       }
@@ -253,12 +250,11 @@ class AssetServiceSpec extends ZIntegrationMockSpec with DerivedLogTag with Auth
       (cache.putStream _).expects(*, *).anyNumberOfTimes().returns(Future.successful(()))
       (assetStorage.save _).expects(*).anyNumberOfTimes().returns(Future.successful(()))
       (rawCache.remove _).expects(*).anyNumberOfTimes().returns(Future.successful(()))
-      (transformationsService.getTransformations _).expects(*, *).once().returns(List())
-      (restrictionsService.validate _).expects(*).once().returns(Success(()))
+      (restrictionsService.validate _).expects(*).anyNumberOfTimes().returns(Success(()))
 
       for {
         _ <- Future.successful(())
-        client = new AssetClient2Impl
+        client = new AssetClientImpl
         rawAssetStorage = new ReactiveStorageImpl2(new UnlimitedInMemoryStorage[UploadAssetId, UploadAsset]()) with UploadAssetStorage
         assetService = service(rawAssetStorage, client)
 

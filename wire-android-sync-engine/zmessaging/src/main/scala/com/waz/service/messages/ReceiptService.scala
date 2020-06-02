@@ -45,12 +45,13 @@ class ReceiptService(messages: MessagesStorage,
     Future.traverse(filteredMessages) { case ((convId, userId), groupMessages) =>
       for {
         false <- convsService.isGroupConversation(convId)
-        _ <- sync.postReceipt(convId, groupMessages.map(_.id), userId, ReceiptType.Delivery)
+        _     <- sync.postReceipt(convId, groupMessages.map(_.id), userId, ReceiptType.Delivery)
       } yield ()
     }
   }
 
-  val confirmable = Set(TEXT, TEXT_EMOJI_ONLY, IMAGE_ASSET, ANY_ASSET, VIDEO_ASSET, AUDIO_ASSET, KNOCK, RICH_MEDIA, HISTORY_LOST, LOCATION)
+  val confirmable = Set(TEXT, TEXT_EMOJI_ONLY, IMAGE_ASSET, ANY_ASSET, VIDEO_ASSET, AUDIO_ASSET, KNOCK,
+    RICH_MEDIA, HISTORY_LOST, LOCATION, COMPOSITE)
 
   def processDeliveryReceipts(receipts: Seq[MessageId]) =
     if (receipts.nonEmpty) {

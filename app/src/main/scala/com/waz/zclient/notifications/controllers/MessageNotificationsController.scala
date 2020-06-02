@@ -64,7 +64,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
 
   private lazy val notificationManager   = inject[NotificationManagerWrapper]
 
-  private lazy val selfId                = inject[Signal[UserId]]
+  private lazy val selfId                = inject[Signal[Option[UserId]]]
   private lazy val soundController       = inject[SoundController]
   private lazy val navigationController  = inject[NavigationController]
   private lazy val convController        = inject[ConversationController]
@@ -75,22 +75,36 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
 
   override val notificationsSourceVisible: Signal[Map[UserId, Set[ConvId]]] =
     for {
-      accs     <- inject[Signal[AccountsService]].flatMap(_.accountsWithManagers)
-      uiActive <- inject[UiLifeCycle].uiActive
-      selfId   <- selfId
-      convId   <- convController.currentConvIdOpt
-      convs    <- convsStorage.flatMap(_.contents.map(_.keySet))
-      page     <- navigationController.visiblePage
-    } yield
-      accs.map { accId =>
-        accId ->
-          (if (selfId != accId || !uiActive) Set.empty[ConvId]
-          else page match {
-            case Page.CONVERSATION_LIST => convs
-            case Page.MESSAGE_STREAM    => Set(convId).flatten
-            case _                      => Set.empty[ConvId]
-          })
-      }.toMap
+      accs         <- inject[Signal[AccountsService]].flatMap(_.accountsWithManagers)
+      uiActive     <- inject[UiLifeCycle].uiActive
+      Some(selfId) <- selfId
+      convId       <- convController.currentConvIdOpt
+      convs        <- convsStorage.flatMap(_.contents.map(_.keySet))
+      page         <- navigationController.visiblePage
+    } yield accs.map { accId =>
+      accId ->
+        (if (selfId != accId || !uiActive) Set.empty[ConvId]
+        else page match {
+          case Page.CONVERSATION_LIST => convs
+          case Page.MESSAGE_STREAM    => Set(convId).flatten
+          case _                      => Set.empty[ConvId]
+        })
+    }.toMap
+
+  /*
+  Clears notifications already displayed in the tray when the user opens the conversation associated
+  with those notifications. This is separate from removing notifications from the storage and may
+  sometimes be inconsistent (notifications in the tray may stay longer than in the storage).
+   */
+  Signal(selfId, notificationsSourceVisible).onUi {
+    case (Some(selfUserId), sources) =>
+      val notIds = sources.getOrElse(selfUserId, Set.empty).map(toNotificationConvId(selfUserId, _))
+      if (notIds.nonEmpty) notificationManager.cancelNotifications(notIds)
+      notificationManager.cancelNotifications(
+        Set(toNotificationGroupId(selfUserId), toEphemeralNotificationGroupId(selfUserId))
+      )
+    case _ =>
+  }
 
   override def onNotificationsChanged(accountId: UserId, nots: Set[NotificationData]): Future[Unit] = {
     verbose(l"onNotificationsChanged: $accountId, nots: $nots")
@@ -99,12 +113,10 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
       summaries <- createSummaryNotificationProps(accountId, nots, teamName).map(_.map(p => (toNotificationGroupId(accountId), p)))
       convNots  <- createConvNotifications(accountId, nots, teamName).map(_.toMap)
       _         <- Threading.Ui {
-        val nots = convNots ++ summaries
-        if (nots.isEmpty)
-          notificationManager.cancelNotifications(Set(toNotificationGroupId(accountId), toEphemeralNotificationGroupId(accountId)))
-        else
-          nots.foreach { case (id, props) => notificationManager.showNotification(id, props) }
-      }.future
+                     (convNots ++ summaries).foreach {
+                       case (id, props) => notificationManager.showNotification(id, props)
+                     }
+                   }.future
     } yield {}
   }
 
@@ -117,8 +129,8 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
       separator = ""
     )
     for {
-      accountId <- selfId.head
-      color     <- notificationColor(accountId)
+      Some(accountId) <- selfId.head
+      color           <- notificationColor(accountId)
     } yield {
       val props = NotificationProps(
         accountId,
@@ -263,7 +275,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
   private def getMessageTitle(account: UserId, n: NotificationData, teamName: Option[String]) =
     if (n.isConvDeleted) Future.successful(ResString(R.string.notification__message__conversation_deleted))
     else if (n.ephemeral) Future.successful(ResString(R.string.notification__message__ephemeral_someone))
-    else getConvName(account, n).map(_.getOrElse(Name.Empty)).map { convName =>
+    else getConvName(account, n).map { convName =>
       teamName match {
         case Some(name) => ResString (R.string.notification__message__group__prefix__other, convName, name)
         case None       => ResString(convName)
@@ -271,14 +283,14 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
     }
 
   private def getConvName(account: UserId, n: NotificationData) =
-    inject[AccountToConvsStorage].apply(account).flatMap {
-      case Some(storage) => storage.get(n.conv).map(_.map(_.displayName))
-      case None          => Future.successful(Option.empty[Name])
+    inject[AccountToConvsService].apply(account).flatMap {
+      case Some(service) => service.conversationName(n.conv).head
+      case None          => Future.successful(Name.Empty)
     }
 
   private def getUserName(account: UserId, n: NotificationData) =
     inject[AccountToUsersStorage].apply(account).flatMap {
-      case Some(storage) => storage.get(n.user).map(_.map(_.getDisplayName))
+      case Some(storage) => storage.get(n.user).map(_.map(_.name))
       case None          => Future.successful(Option.empty[Name])
     }
 
@@ -297,7 +309,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
                           case CONNECT_ACCEPTED => Future.successful(ResString.Empty)
                           case _                => getDefaultNotificationMessageLineHeader(account, n, singleConversationInBatch)
                         }
-      convName       <- getConvName(account, n).map(_.getOrElse(Name.Empty))
+      convName       <- getConvName(account, n)
       userName       <- getUserName(account, n).map(_.getOrElse(Name.Empty))
       messagePreview <- userPrefs.flatMap(_.preference(UserPreferences.MessagePreview).signal).head
     } yield {
@@ -305,8 +317,8 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
         case _ if n.ephemeral && n.isSelfMentioned    => ResString(R.string.notification__message_with_mention__ephemeral)
         case _ if n.ephemeral && n.isReply            => ResString(R.string.notification__message_with_quote__ephemeral)
         case _ if n.ephemeral                         => ResString(R.string.notification__message__ephemeral)
-        case TEXT if messagePreview                   => ResString(message)
-        case TEXT                                     => ResString(R.string.notification__message_one_to_one_message_preview)
+        case TEXT | COMPOSITE if messagePreview       => ResString(message)
+        case TEXT | COMPOSITE                         => ResString(R.string.notification__message_one_to_one_message_preview)
         case MISSED_CALL                              => ResString(R.string.notification__message__one_to_one__wanted_to_talk)
         case KNOCK                                    => ResString(R.string.notification__message__one_to_one__pinged)
         case ANY_ASSET                                => ResString(R.string.notification__message__one_to_one__shared_file)
@@ -315,8 +327,6 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
         case AUDIO_ASSET                              => ResString(R.string.notification__message__one_to_one__shared_audio)
         case LOCATION                                 => ResString(R.string.notification__message__one_to_one__shared_location)
         case RENAME                                   => ResString(R.string.notification__message__group__renamed_conversation, convName)
-        case MEMBER_LEAVE                             => ResString(R.string.notification__message__group__remove)
-        case MEMBER_JOIN                              => ResString(R.string.notification__message__group__add)
         case CONNECT_ACCEPTED                         => ResString(R.string.notification__message__single__accept_request, userName)
         case CONNECT_REQUEST                          => ResString(R.string.people_picker__invite__share_text__header, userName)
         case MESSAGE_SENDING_FAILED                   => ResString(R.string.notification__message__send_failed)
@@ -330,7 +340,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
         case _ => ResString.Empty
       }
 
-      getMessageSpannable(header, body, n.msgType == TEXT)
+      getMessageSpannable(header, body, n.msgType == TEXT || n.msgType == COMPOSITE)
     }
   }
 
@@ -361,10 +371,10 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
             R.string.notification__message_with_quote__name__prefix__text_one2one
           else 0
         if (prefixId > 0) {
-          convName match {
-            case Some(cn) => ResString(prefixId, userName, cn)
-            case None => ResString(prefixId, List(ResString(userName), ResString(R.string.notification__message__group__default_conversation_name)))
-          }
+          if (convName.isEmpty)
+            ResString(prefixId, List(ResString(userName), ResString(R.string.notification__message__group__default_conversation_name)))
+          else
+            ResString(prefixId, userName, convName)
         }
         else ResString.Empty
       }
@@ -410,7 +420,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
     else if (!soundController.soundIntensityFull && (ns.size > 1 && ns.lastOption.forall(_.msgType != KNOCK))) None
     else ns.map(_.msgType).lastOption.fold(Option.empty[Uri]) {
       case IMAGE_ASSET | ANY_ASSET | VIDEO_ASSET | AUDIO_ASSET |
-           LOCATION | TEXT | CONNECT_ACCEPTED | CONNECT_REQUEST | RENAME |
+           LOCATION | TEXT | CONNECT_ACCEPTED | CONNECT_REQUEST | RENAME | COMPOSITE |
            LIKE  => Option(getSelectedSoundUri(soundController.currentTonePrefs._2, R.raw.new_message_gcm))
       case KNOCK => Option(getSelectedSoundUri(soundController.currentTonePrefs._3, R.raw.ping_from_them))
       case _     => None
@@ -433,7 +443,7 @@ class MessageNotificationsController(bundleEnabled: Boolean = Build.VERSION.SDK_
     val n = ns.head
 
     for {
-      convName <- getConvName(account, n).map(_.getOrElse(Name.Empty))
+      convName <- getConvName(account, n)
       messages <- Future.sequence(ns.sortBy(_.time.instant).map(n => getMessage(account, n, singleConversationInBatch = isSingleConv)).takeRight(5).toList)
     } yield {
       val header =
@@ -498,5 +508,4 @@ object MessageNotificationsController {
 
   val ZETA_MESSAGE_NOTIFICATION_ID: Int = 1339272
   val ZETA_EPHEMERAL_NOTIFICATION_ID: Int = 1339279
-
 }

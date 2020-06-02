@@ -15,6 +15,9 @@
  */
 package com.waz.zclient.core.functional
 
+import com.waz.zclient.core.functional.Either.Left
+import com.waz.zclient.core.functional.Either.Right
+
 /**
  * Represents a value of one of two possible types (a disjoint union).
  * Instances of [Either] are either an instance of [Left] or [Right].
@@ -48,7 +51,6 @@ sealed class Either<out L, out R> {
      * @see Left
      */
     fun <L> left(a: L) = Either.Left(a)
-
 
     /**
      * Creates a Left type.
@@ -117,4 +119,3 @@ fun <L, R> Either<L, R>.getOrElse(value: R): R =
         is Either.Left -> value
         is Either.Right -> b
     }
-

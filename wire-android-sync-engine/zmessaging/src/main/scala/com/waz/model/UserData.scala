@@ -20,18 +20,19 @@ package com.waz.model
 import com.waz.api.Verification
 import com.waz.db.Col._
 import com.waz.db.Dao
-import com.waz.model
+import com.waz.{api, model}
 import com.waz.model.AssetMetaData.Image.Tag.Medium
 import com.waz.model.ManagedBy.ManagedBy
 import com.waz.model.UserData.ConnectionStatus
 import com.waz.model.UserPermissions._
 import com.waz.service.{SearchKey, SearchQuery}
 import com.waz.service.UserSearchService.UserSearchEntry
-import com.waz.service.assets2.StorageCodecs
+import com.waz.service.assets.StorageCodecs
 import com.waz.utils._
 import com.waz.utils.wrappers.{DB, DBCursor}
 
 import scala.concurrent.duration._
+import scala.util.Try
 
 case class UserData(override val id:       UserId,
                     teamId:                Option[TeamId]         = None,
@@ -48,7 +49,6 @@ case class UserData(override val id:       UserId,
                     conversation:          Option[RConvId]        = None, // remote conversation id with this contact (one-to-one)
                     relation:              Relation               = Relation.Other, //unused - remove in future migration
                     syncTimestamp:         Option[LocalInstant]   = None,
-                    displayName:           Name                   = Name.Empty,
                     verified:              Verification           = Verification.UNKNOWN, // user is verified if he has any otr client, and all his clients are verified
                     deleted:               Boolean                = false,
                     availability:          Availability           = Availability.None,
@@ -61,19 +61,17 @@ case class UserData(override val id:       UserId,
                     permissions:           PermissionsMasks       = (0,0),
                     createdBy:             Option[UserId]         = None) extends Identifiable[UserId] {
 
-  def isConnected = ConnectionStatus.isConnected(connection)
-  def hasEmailOrPhone = email.isDefined || phone.isDefined
-  def isSelf = connection == ConnectionStatus.Self
-  def isAcceptedOrPending = connection == ConnectionStatus.Accepted || connection == ConnectionStatus.PendingFromOther || connection == ConnectionStatus.PendingFromUser
-  def isVerified = verified == Verification.VERIFIED
-  def isAutoConnect = isConnected && ! isSelf && connectionMessage.isEmpty
-  def isReadOnlyProfile = managedBy.exists(_ != ManagedBy.Wire) //if none or "Wire", then it's not read only.
-  lazy val isWireBot = integrationId.nonEmpty
+  lazy val isConnected: Boolean         = ConnectionStatus.isConnected(connection)
+  lazy val hasEmailOrPhone: Boolean     = email.isDefined || phone.isDefined
+  lazy val isSelf: Boolean              = connection == ConnectionStatus.Self
+  lazy val isAcceptedOrPending: Boolean = connection == ConnectionStatus.Accepted || connection == ConnectionStatus.PendingFromOther || connection == ConnectionStatus.PendingFromUser
+  lazy val isVerified: Boolean          = verified == Verification.VERIFIED
+  lazy val isAutoConnect: Boolean       = isConnected && ! isSelf && connectionMessage.isEmpty
+  lazy val isReadOnlyProfile: Boolean   = managedBy.exists(_ != ManagedBy.Wire) //if none or "Wire", then it's not read only.
+  lazy val isWireBot: Boolean           = integrationId.nonEmpty
 
-  def getDisplayName = if (displayName.isEmpty) name else displayName
-
-  def updated(user: UserInfo): UserData = updated(user, withSearchKey = true)
-  def updated(user: UserInfo, withSearchKey: Boolean): UserData = copy(
+  def updated(user: UserInfo): UserData = updated(user, withSearchKey = true, permissions = permissions)
+  def updated(user: UserInfo, withSearchKey: Boolean, permissions: PermissionsMasks): UserData = copy(
     name          = user.name.getOrElse(name),
     email         = user.email.orElse(email),
     phone         = user.phone.orElse(phone),
@@ -91,11 +89,13 @@ case class UserData(override val id:       UserId,
     handle        = user.handle match {
       case Some(h) if !h.toString.isEmpty => Some(h)
       case _ => handle
-    }
+    },
+    permissions = permissions
   )
 
   def updated(user: UserSearchEntry): UserData = copy(
     name      = user.name,
+    teamId    = user.teamId,
     searchKey = SearchKey(user.name),
     accent    = user.colorId.getOrElse(accent),
     handle    = Some(user.handle)
@@ -147,9 +147,9 @@ object UserData {
 
   lazy val Empty = UserData(UserId("EMPTY"), "")
 
-  type ConnectionStatus = com.waz.api.User.ConnectionStatus
+  type ConnectionStatus = api.ConnectionStatus
   object ConnectionStatus {
-    import com.waz.api.User.ConnectionStatus._
+    import com.waz.api.ConnectionStatus._
 
     val Unconnected = UNCONNECTED
     val PendingFromUser = PENDING_FROM_USER
@@ -175,7 +175,7 @@ object UserData {
   def apply(entry: UserSearchEntry): UserData =
     UserData(
       id        = entry.id,
-      teamId    = None,
+      teamId    = entry.teamId,
       name      = entry.name,
       accent    = entry.colorId.getOrElse(0),
       searchKey = SearchKey(entry.name),
@@ -184,7 +184,8 @@ object UserData {
 
   def apply(user: UserInfo): UserData = apply(user, withSearchKey = true)
 
-  def apply(user: UserInfo, withSearchKey: Boolean): UserData = UserData(user.id, user.name.getOrElse(Name.Empty)).updated(user, withSearchKey)
+  def apply(user: UserInfo, withSearchKey: Boolean): UserData =
+    UserData(user.id, user.name.getOrElse(Name.Empty)).updated(user, withSearchKey, permissions = (0L, 0L))
 
   implicit object UserDataDao extends Dao[UserData, UserId] with StorageCodecs {
     val Id = id[UserId]('_id, "PRIMARY KEY").apply(_.id)
@@ -202,8 +203,7 @@ object UserData {
     val Conversation = opt(id[RConvId]('conversation))(_.conversation)
     val Rel = text[Relation]('relation, _.name, Relation.valueOf)(_.relation)
     val Timestamp = opt(localTimestamp('timestamp))(_.syncTimestamp)
-    val DisplayName = text[model.Name]('display_name, _.str, model.Name(_))(_.displayName)
-    val Verified = text[Verification]('verified, _.name, Verification.valueOf)(_.verified)
+    val Verified = text[Verification]('verified, _.name, getVerification)(_.verified)
     val Deleted = bool('deleted)(_.deleted)
     val AvailabilityStatus = int[Availability]('availability, _.id, Availability.apply)(_.availability)
     val Handle = opt(handle('handle))(_.handle)
@@ -211,21 +211,23 @@ object UserData {
     val IntegrationId = opt(id[IntegrationId]('integration_id))(_.integrationId)
     val ExpiresAt = opt(remoteTimestamp('expires_at))(_.expiresAt)
     val Managed = opt(text[ManagedBy]('managed_by, _.toString, ManagedBy(_)))(_.managedBy)
-    val Fields = json[Seq[UserField]]('fields)(UserField.userFieldsDecoder, UserField.userFieldsEncoder)(_.fields)
     val SelfPermissions = long('self_permissions)(_.permissions._1)
     val CopyPermissions = long('copy_permissions)(_.permissions._2)
     val CreatedBy = opt(id[UserId]('created_by))(_.createdBy)
 
+    private def getVerification(name: String): Verification =
+      Try(Verification.valueOf(name)).getOrElse(Verification.UNKNOWN)
+
     override val idCol = Id
     override val table = Table(
       "Users", Id, TeamId, Name, Email, Phone, TrackingId, Picture, Accent, SKey, Conn, ConnTime, ConnMessage,
-      Conversation, Rel, Timestamp, DisplayName, Verified, Deleted, AvailabilityStatus, Handle, ProviderId, IntegrationId,
+      Conversation, Rel, Timestamp, Verified, Deleted, AvailabilityStatus, Handle, ProviderId, IntegrationId,
       ExpiresAt, Managed, SelfPermissions, CopyPermissions, CreatedBy // Fields are now lazy-loaded from BE every time the user opens a profile
     )
 
     override def apply(implicit cursor: DBCursor): UserData = new UserData(
       Id, TeamId, Name, Email, Phone, TrackingId, Picture, Accent, SKey, Conn, RemoteInstant.ofEpochMilli(ConnTime.getTime), ConnMessage,
-      Conversation, Rel, Timestamp, DisplayName, Verified, Deleted, AvailabilityStatus, Handle, ProviderId, IntegrationId, ExpiresAt, Managed,
+      Conversation, Rel, Timestamp, Verified, Deleted, AvailabilityStatus, Handle, ProviderId, IntegrationId, ExpiresAt, Managed,
       Seq.empty, (SelfPermissions, CopyPermissions), CreatedBy
     )
 
@@ -245,8 +247,6 @@ object UserData {
 
     def findAll(users: Set[UserId])(implicit db: DB) = iteratingMultiple(findInSet(Id, users))
 
-    def listContacts(implicit db: DB) = list(db.query(table.name, null, s"(${Conn.name} = ? or ${Conn.name} = ?) and ${Deleted.name} = 0", Array(ConnectionStatus.Accepted.code, ConnectionStatus.Blocked.code), null, null, null))
-
     def topPeople(implicit db: DB): Managed[Iterator[UserData]] =
       search(s"${Conn.name} = ? and ${Deleted.name} = 0", Array(Conn(ConnectionStatus.Accepted)))
 
@@ -257,12 +257,11 @@ object UserData {
                 |    (
                 |      ${SKey.name} LIKE ? OR ${SKey.name} LIKE ?
                 |    ) AND (${Rel.name} = '${Rel(Relation.First)}' OR ${Rel.name} = '${Rel(Relation.Second)}' OR ${Rel.name} = '${Rel(Relation.Third)}')
-                |  ) OR ${Email.name} = ?
-                |    OR ${Handle.name} LIKE ?
+                |  ) OR ${Handle.name} LIKE ?
                 |) AND ${Deleted.name} = 0
                 |  AND ${Conn.name} != '${Conn(ConnectionStatus.Accepted)}' AND ${Conn.name} != '${Conn(ConnectionStatus.Blocked)}' AND ${Conn.name} != '${Conn(ConnectionStatus.Self)}'
               """.stripMargin,
-        Array(s"${query.asciiRepresentation}%", s"% ${query.asciiRepresentation}%", prefix, s"%${query.asciiRepresentation}%"))
+        Array(s"${query.asciiRepresentation}%", s"% ${query.asciiRepresentation}%", s"%${query.asciiRepresentation}%"))
     }
 
     def search(whereClause: String, args: Array[String])(implicit db: DB): Managed[Iterator[UserData]] =
@@ -282,7 +281,7 @@ object UserData {
         }
       val teamCondition = teamId.map(tId => s"AND u.${TeamId.name} = '$tId'")
 
-      list(db.rawQuery(select + " " + handleCondition + teamCondition.map(qu => s" $qu").getOrElse(""), null)).toSet
+      list(db.rawQuery(select + " " + handleCondition + teamCondition.map(qu => s" $qu").getOrElse(""))).toSet
     }
 
     def findForTeams(teams: Set[TeamId])(implicit db: DB) = iteratingMultiple(findInSet(TeamId, teams.map(Option(_))))

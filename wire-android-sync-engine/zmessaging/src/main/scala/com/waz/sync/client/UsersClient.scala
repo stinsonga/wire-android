@@ -21,7 +21,6 @@ import com.waz.api.impl.ErrorResponse
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.log.LogSE._
 import com.waz.model._
-import com.waz.service.tracking.TrackingService.NoReporting
 import com.waz.threading.{CancellableFuture, Threading}
 import com.waz.utils.{JsonDecoder, JsonEncoder}
 import com.waz.znet2.AuthRequestInterceptor
@@ -33,7 +32,9 @@ import scala.concurrent.Future
 import scala.util.Right
 
 trait UsersClient {
+  def loadUser(id: UserId): ErrorOrResponse[Option[UserInfo]]
   def loadUsers(ids: Seq[UserId]): ErrorOrResponse[Seq[UserInfo]]
+  def loadByHandle(handle: Handle): ErrorOrResponse[Option[UserInfo]]
   def loadSelf(): ErrorOrResponse[UserInfo]
   def loadRichInfo(user: UserId): ErrorOrResponse[Seq[UserField]]
   def updateSelf(info: UserInfo): ErrorOrResponse[Unit]
@@ -54,6 +55,20 @@ class UsersClientImpl(implicit
   private implicit val UsersResponseDeserializer: RawBodyDeserializer[Seq[UserInfo]] =
     RawBodyDeserializer[JSONArray].map(json => JsonDecoder.array[UserInfo](json))
 
+  override def loadUser(id: UserId): ErrorOrResponse[Option[UserInfo]] =
+    Request.Get(relativePath = usersPath(id))
+      .withResultType[UserInfo]
+      .withErrorType[ErrorResponse]
+      .execute
+      .map {
+        case res if res.deleted => Right(None)
+        case res => Right(Some(res))
+      }
+      .recover {
+        case e: ErrorResponse if e.code == ErrorResponse.NotFound => Right(None)
+        case e: ErrorResponse => Left(e)
+      }
+
   override def loadUsers(ids: Seq[UserId]): ErrorOrResponse[Seq[UserInfo]] = {
     if (ids.isEmpty) CancellableFuture.successful(Right(Vector()))
     else {
@@ -67,6 +82,17 @@ class UsersClientImpl(implicit
       CancellableFuture.lift(result)
     }
   }
+
+  override def loadByHandle(handle: Handle): ErrorOrResponse[Option[UserInfo]] =
+    Request.Get(
+      relativePath = UsersPath,
+      queryParameters = queryParameters("handles" -> handle.string.toLowerCase)
+    )
+      .withResultType[Seq[UserInfo]]
+      .withErrorType[ErrorResponse]
+      .execute
+      .map(res => Right(res.headOption))
+      .recover { case e: ErrorResponse => Left(e) }
 
   override def loadSelf(): ErrorOrResponse[UserInfo] = {
     Request.Get(relativePath = SelfPath)
@@ -115,6 +141,8 @@ object UsersClient {
   val SearchablePath = "/self/searchable"
   val IdsCountThreshold = 64
 
+  def usersPath(user: UserId) = s"$UsersPath/${user.str}"
+
   case class DeleteAccount(password: Option[String])
 
   implicit lazy val DeleteAccountEncoder: JsonEncoder[DeleteAccount] = new JsonEncoder[DeleteAccount] {
@@ -122,8 +150,4 @@ object UsersClient {
       v.password foreach (o.put("password", _))
     }
   }
-
-  class FailedLoadUsersResponse(val error: ErrorResponse)
-    extends RuntimeException(s"loading users failed with: $error") with NoReporting
-
 }

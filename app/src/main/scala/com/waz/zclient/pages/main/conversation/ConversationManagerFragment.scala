@@ -24,7 +24,7 @@ import android.view.{LayoutInflater, View, ViewGroup}
 import androidx.fragment.app.{Fragment, FragmentManager}
 import com.waz.api.MessageContent
 import com.waz.model.{MessageContent => _, _}
-import com.waz.service.assets2.{Content, ContentForUpload}
+import com.waz.service.assets.{Content, ContentForUpload}
 import com.waz.service.tracking.GroupConversationEvent
 import com.waz.threading.Threading
 import com.waz.zclient.camera.CameraFragment
@@ -43,11 +43,13 @@ import com.waz.zclient.conversation.{ConversationController, LikesAndReadsFragme
 import com.waz.zclient.core.stores.conversation.ConversationChangeRequester
 import com.waz.zclient.drawing.DrawingFragment
 import com.waz.zclient.giphy.GiphySharingPreviewFragment
-import com.waz.zclient.pages.main.connect.UserProfileContainer
+import com.waz.zclient.log.LogUI._
+import com.waz.zclient.messages.UsersController
 import com.waz.zclient.pages.main.conversation.controller.{ConversationScreenControllerObserver, IConversationScreenController}
 import com.waz.zclient.pages.main.profile.camera.CameraContext
 import com.waz.zclient.participants.ParticipantsController
 import com.waz.zclient.participants.fragments.ParticipantFragment
+import com.waz.zclient.utils.ContextUtils
 import com.waz.zclient.views.ConversationFragment
 import com.waz.zclient.{FragmentHelper, R}
 
@@ -55,12 +57,12 @@ class ConversationManagerFragment extends FragmentHelper
   with ConversationScreenControllerObserver
   with LocationObserver
   with CollectionsObserver
-  with UserProfileContainer
   with CameraActionObserver {
 
   import Threading.Implicits.Ui
 
   private lazy val convController         = inject[ConversationController]
+  private lazy val usersController        = inject[UsersController]
   private lazy val collectionController   = inject[CollectionController]
   private lazy val navigationController   = inject[INavigationController]
   private lazy val cameraController       = inject[ICameraController]
@@ -123,10 +125,17 @@ class ConversationManagerFragment extends FragmentHelper
     }
 
     subs += participantsController.onShowParticipantsWithUserId.onUi { p =>
-      keyboard.hideKeyboardIfVisible()
-      navigationController.setRightPage(Page.PARTICIPANT, ConversationManagerFragment.Tag)
-      participantsController.selectParticipant(p.userId)
-      showFragment(ParticipantFragment.newInstance(p.userId, p.fromDeepLink), ParticipantFragment.TAG)
+      usersController.syncUserAndCheckIfDeleted(p.userId).foreach {
+        case (Some(user), None) =>
+          ContextUtils.showToast(getString(R.string.participant_was_removed_from_team, user.name.str))
+        case (None, None) =>
+          warn(l"Trying to show a non-existing user with id ${p.userId}")
+        case _ =>
+          keyboard.hideKeyboardIfVisible()
+          navigationController.setRightPage(Page.PARTICIPANT, ConversationManagerFragment.Tag)
+          participantsController.selectParticipant(p.userId)
+          showFragment(ParticipantFragment.newInstance(p.userId, p.fromDeepLink), ParticipantFragment.TAG)
+      }
     }
 
     subs += participantsController.onLeaveParticipants.onUi { withAnimations =>
@@ -216,13 +225,6 @@ class ConversationManagerFragment extends FragmentHelper
     navigationController.setRightPage(Page.MESSAGE_STREAM, ConversationManagerFragment.Tag)
   }
 
-  override def dismissUserProfile(): Unit = dismissSingleUserProfile()
-
-  override def dismissSingleUserProfile(): Unit = {
-    getChildFragmentManager.popBackStackImmediate
-    navigationController.setRightPage(Page.MESSAGE_STREAM, ConversationManagerFragment.Tag)
-  }
-
   override def onBitmapSelected(content: Content, cameraContext: CameraContext): Unit =
     if (cameraContext == CameraContext.MESSAGE) {
       val convController = inject[ConversationController]
@@ -276,8 +278,6 @@ class ConversationManagerFragment extends FragmentHelper
   override def onShowConversationMenu(inConvList: Boolean, convId: ConvId): Unit = {}
 
   override def onHideOtrClient(): Unit = {}
-
-  override def showRemoveConfirmation(userId: UserId): Unit = {}
 
   override def onCameraNotAvailable(): Unit = {}
 

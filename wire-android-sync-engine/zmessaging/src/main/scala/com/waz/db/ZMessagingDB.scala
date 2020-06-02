@@ -18,13 +18,14 @@
 package com.waz.db
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.waz.api.Message
 import com.waz.content.PropertiesDao
 import com.waz.db.ZMessagingDB.{DbVersion, daos, migrations}
 import com.waz.db.migrate._
 import com.waz.model.AddressBook.ContactHashesDao
 import com.waz.model.AssetData.AssetDataDao
+import com.waz.model.ButtonData.ButtonDataDao
 import com.waz.model.Contact.{ContactsDao, ContactsOnWireDao, EmailAddressesDao, PhoneNumbersDao}
 import com.waz.model.ConversationData.ConversationDataDao
 import com.waz.model.ConversationFolderData.ConversationFolderDataDao
@@ -40,23 +41,23 @@ import com.waz.model.MsgDeletion.MsgDeletionDao
 import com.waz.model.NotificationData.NotificationDataDao
 import com.waz.model.PushNotificationEvents.PushNotificationEventsDao
 import com.waz.model.ReadReceipt.ReadReceiptDao
-import com.waz.model.TeamData.TeamDataDao
 import com.waz.model.UserData.UserDataDao
 import com.waz.model._
 import com.waz.model.otr.UserClients.UserClientsDao
 import com.waz.model.sync.SyncJob.SyncJobDao
-import com.waz.service.assets2.AssetStorageImpl.AssetDao
-import com.waz.service.assets2.DownloadAssetStorage.DownloadAssetDao
-import com.waz.service.assets2.UploadAssetStorage.UploadAssetDao
 import com.waz.repository.FCMNotificationStatsRepository.FCMNotificationStatsDao
 import com.waz.repository.FCMNotificationsRepository.FCMNotificationsDao
+import com.waz.service.assets
+import com.waz.service.assets.AssetStorageImpl.AssetDao
+import com.waz.service.assets.DownloadAssetStorage.DownloadAssetDao
+import com.waz.service.assets.UploadAssetStorage.UploadAssetDao
 import com.waz.service.tracking.TrackingService
 
 import scala.util.{Success, Try}
 
-class ZMessagingDB(context: Context, dbName: String, tracking: TrackingService) extends DaoDB(context.getApplicationContext, dbName, null, DbVersion, daos, migrations, tracking) {
+class ZMessagingDB(context: Context, dbName: String, tracking: TrackingService) extends DaoDB(context.getApplicationContext, dbName, DbVersion, daos, migrations, tracking) {
 
-  override def onUpgrade(db: SQLiteDatabase, from: Int, to: Int): Unit = {
+  override def onUpgrade(db: SupportSQLiteDatabase, from: Int, to: Int): Unit = {
     if (from < 60) {
       dropAllTables(db)
       onCreate(db)
@@ -65,16 +66,16 @@ class ZMessagingDB(context: Context, dbName: String, tracking: TrackingService) 
 }
 
 object ZMessagingDB {
-  val DbVersion = 125
+  val DbVersion = 126
 
   lazy val daos = Seq (
     UserDataDao, AssetDataDao, ConversationDataDao, ConversationMemberDataDao,
     MessageDataDao, KeyValueDataDao, SyncJobDao, ErrorDataDao, NotificationDataDao,
     ContactHashesDao, ContactsOnWireDao, UserClientsDao, LikingDao, ContactsDao, EmailAddressesDao,
-    PhoneNumbersDao, MsgDeletionDao, EditHistoryDao, MessageContentIndexDao,
+    PhoneNumbersDao, MsgDeletionDao, EditHistoryDao,
     PushNotificationEventsDao, ReadReceiptDao, PropertiesDao, UploadAssetDao, DownloadAssetDao,
     AssetDao, FCMNotificationsDao, FCMNotificationStatsDao, FolderDataDao, ConversationFolderDataDao,
-    ConversationRoleActionDao
+    ConversationRoleActionDao, ButtonDataDao, MessageContentIndexDao
   )
 
   lazy val migrations = Seq(
@@ -312,8 +313,8 @@ object ZMessagingDB {
     },
     Migration(120, 121) { db =>
       import com.waz.model.AssetData.{AssetDataDao => OldAssetDao}
-      import com.waz.service.assets2.AssetStorageImpl.{AssetDao => NewAssetDao}
-      import com.waz.service.assets2._
+      import com.waz.service.assets.AssetStorageImpl.{AssetDao => NewAssetDao}
+      import com.waz.service.assets._
 
       //Create new tables
       db.execSQL(UploadAssetDao.table.createSql)
@@ -326,9 +327,9 @@ object ZMessagingDB {
 
       //Convert old assets to new assets (public assets won't be converted)
       def convertAsset(old: AssetData): Try[Asset] = Try {
-        val encryption = old.otrKey.map(k => AES_CBC_Encryption(AESKey2(k.bytes)))
+        val encryption = old.otrKey.map(k => AES_CBC_Encryption(AESKeyBytes(k.bytes)))
 
-        Asset(
+        assets.Asset(
           id = old.remoteId.map(rid => AssetId(rid.str)).getOrElse(old.id),
           token = old.token,
           sha = old.sha.get,
@@ -390,6 +391,49 @@ object ZMessagingDB {
     Migration(124,125) { db =>
       db.execSQL(s"ALTER TABLE ${ConversationMemberDataDao.table.name} ADD COLUMN ${ConversationMemberDataDao.Role.name} TEXT DEFAULT '${ConversationRole.AdminRole.label}'")
       db.execSQL(ConversationRoleActionDao.table.createSql)
+    },
+    Migration(125,126) { db =>
+      db.execSQL(
+        s"""
+           | UPDATE Users
+           | SET name = display_name
+           | WHERE display_name IS NOT NULL AND display_name IS NOT "" AND name IS NOT display_name
+        """.stripMargin)
+      db.execSQL(
+        """
+          | CREATE TABLE UsersCopy (
+          | _id TEXT PRIMARY KEY,
+          | teamId TEXT, name TEXT, email TEXT, phone TEXT, tracking_id TEXT,
+          | picture TEXT, accent INTEGER, skey TEXT, connection TEXT, conn_timestamp INTEGER,
+          | conn_msg TEXT, conversation TEXT, relation TEXT, timestamp INTEGER,
+          | verified TEXT, deleted INTEGER, availability INTEGER,
+          | handle TEXT, provider_id TEXT, integration_id TEXT, expires_at INTEGER,
+          | managed_by TEXT, self_permissions INTEGER, copy_permissions INTEGER, created_by TEXT
+          | )
+        """.stripMargin)
+      db.execSQL(
+        """
+          |INSERT INTO UsersCopy(
+          | _id,
+          | teamId, name, email, phone, tracking_id,
+          | picture, accent, skey, connection, conn_timestamp,
+          | conn_msg, conversation, relation, timestamp,
+          | verified, deleted, availability,
+          | handle, provider_id, integration_id, expires_at,
+          | managed_by, self_permissions, copy_permissions, created_by
+          | )
+          | SELECT
+          | _id,
+          | teamId, name, email, phone, tracking_id,
+          | picture, accent, skey, connection, conn_timestamp,
+          | conn_msg, conversation, relation, timestamp,
+          | verified, deleted, availability,
+          | handle, provider_id, integration_id, expires_at,
+          | managed_by, self_permissions, copy_permissions, created_by
+          | FROM Users
+        """.stripMargin)
+      db.execSQL("DROP TABLE Users")
+      db.execSQL("ALTER TABLE UsersCopy RENAME TO Users")
     }
   )
 }

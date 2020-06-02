@@ -30,7 +30,7 @@ import androidx.appcompat.widget.Toolbar
 import android.view.{MenuItem, View, ViewGroup}
 import android.widget.{FrameLayout, Toast}
 import com.waz.content.UserPreferences
-import com.waz.service.assets2.Content
+import com.waz.service.assets.Content
 import com.waz.service.{AccountsService, ZMessaging}
 import com.waz.threading.Threading
 import com.waz.utils.events.Signal
@@ -66,7 +66,7 @@ class PreferencesActivity extends BaseActivity
   @SuppressLint(Array("PrivateResource"))
   override def onCreate(@Nullable savedInstanceState: Bundle) = {
     super.onCreate(savedInstanceState)
-    setContentView(R.layout.activity_settings)
+    setContentView(R.layout.activity_settings_legacy)
     setSupportActionBar(toolbar)
     getSupportActionBar.setDisplayHomeAsUpEnabled(true)
     getSupportActionBar.setDisplayShowHomeEnabled(true)
@@ -91,10 +91,6 @@ class PreferencesActivity extends BaseActivity
       }
     } else {
       backStackNavigator.onRestore(findViewById(R.id.content).asInstanceOf[ViewGroup], savedInstanceState)
-    }
-
-    accentColor.on(Threading.Ui) { color =>
-      getControllerFactory.getUserPreferencesController.setLastAccentColor(color.color)
     }
 
     accountTabs.onTabClick.onUi { account =>

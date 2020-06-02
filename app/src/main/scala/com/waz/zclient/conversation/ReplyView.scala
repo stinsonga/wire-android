@@ -27,7 +27,7 @@ import com.bumptech.glide.load.resource.bitmap.{CenterCrop, RoundedCorners}
 import com.bumptech.glide.request.RequestOptions
 import com.waz.api.Message.Type
 import com.waz.model.{AssetId, GeneralAssetId, MessageData}
-import com.waz.service.assets2.{Asset, GeneralAsset}
+import com.waz.service.assets.{Asset, GeneralAsset}
 import com.waz.utils.returning
 import com.waz.zclient.conversation.ReplyView.ReplyBackgroundDrawable
 import com.waz.zclient.glide.WireGlide
@@ -61,7 +61,7 @@ class ReplyView(context: Context, attrs: AttributeSet, defStyle: Int) extends Fr
   def setOnClose(onClose: => Unit): Unit = this.onClose = () => onClose
 
   def setMessage(messageData: MessageData, asset: Option[GeneralAsset], senderName: String): Unit = {
-    setSender(senderName, !messageData.editTime.isEpoch)
+    setSender(senderName, messageData.isEdited)
 
     messageData.msgType match {
       case Type.TEXT | Type.TEXT_EMOJI_ONLY | Type.RICH_MEDIA =>

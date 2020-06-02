@@ -21,7 +21,7 @@ import android.view.View.OnLayoutChangeListener
 import android.view.{View, ViewGroup}
 import android.widget.{FrameLayout, TextView}
 import com.waz.model.{Dim2, MessageContent}
-import com.waz.service.assets2._
+import com.waz.service.assets.{AssetStatus, DownloadAssetStatus, ImageDetails, UploadAssetStatus, VideoDetails}
 import com.waz.service.messages.MessageAndLikes
 import com.waz.threading.Threading
 import com.waz.utils.events.Signal
@@ -133,11 +133,6 @@ trait ImageLayoutAssetPart extends AssetPart with EphemeralIndicatorPartView {
     case ImageDetails(dim: Dim2) => dim
     case VideoDetails(dim: Dim2, _) => dim
     case _ => Dim2(0, 0)
-  }
-
-  val forceDownload = this match {
-    case _: ImagePartView => false
-    case _ => true
   }
 
   private lazy val imageContainer = returning(findById[FrameLayout](R.id.image_container)) {

@@ -34,7 +34,7 @@ import com.waz.model.otr.ClientId
 import com.waz.service.ZMessaging.{accountTag, clock}
 import com.waz.service._
 import com.waz.service.otr.OtrService
-import com.waz.service.push.PushService.{Results, SyncMode, SyncSource}
+import com.waz.service.push.PushService.SyncMode
 import com.waz.service.tracking.TrackingService
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.PushNotificationsClient.LoadNotificationsResult
@@ -116,19 +116,18 @@ class PushServiceImpl(selfUserId:           UserId,
 
   notificationStorage.registerEventHandler { () =>
     Serialized.future(PipelineKey) {
-      verbose(l"SYNC events processing started")
-      val t = System.currentTimeMillis()
       for {
         _ <- Future.successful(processing ! true)
+        t =  System.currentTimeMillis()
         _ <- processEncryptedRows()
         _ <- processDecryptedRows()
+        _ = verbose(l"events processing finished, time: ${System.currentTimeMillis() - t}ms")
         _ <- Future.successful(processing ! false)
-        _ = verbose(l"SYNC events processing finished, time: ${System.currentTimeMillis() - t}ms")
       } yield {}
     }.recover {
       case ex =>
         processing ! false
-        error(l"SYNC Unable to process events: $ex")
+        error(l"Unable to process events: $ex")
     }
   }
 
@@ -189,16 +188,14 @@ class PushServiceImpl(selfUserId:           UserId,
 
   private val timeOffset = System.currentTimeMillis()
   @inline private def timePassed = System.currentTimeMillis() - timeOffset
-  verbose(l"SYNC PushService created with the time offset: $timeOffset")
 
   wsPushService.notifications { nots =>
-    verbose(l"SYNC notifications received: ${nots.size}")
     syncNotifications(StoreNotifications(nots))
   }
 
-  wsPushService.connected().onChanged.map(WebSocketChange).on(dispatcher){
+  wsPushService.connected.onChanged.map(WebSocketChange).on(dispatcher){
     case source@WebSocketChange(true) =>
-      verbose(l"SYNC sync history due to web socket change")
+      verbose(l"sync history due to web socket change")
       syncNotifications(SyncHistory(source))
     case _ =>
   }
@@ -206,7 +203,6 @@ class PushServiceImpl(selfUserId:           UserId,
   private var fetchInProgress: Future[Unit] = Future.successful(())
 
   override def syncNotifications(syncMode: SyncMode): Future[Unit] = {
-    verbose(l"SYNC syncNotifications $syncMode")
     def fetch(syncMode: SyncMode) = syncMode match {
       case StoreNotifications(notifications) => storeNotifications(notifications)
       case SyncHistory(source, withRetries)  => syncHistory(source, withRetries)
@@ -218,7 +214,6 @@ class PushServiceImpl(selfUserId:           UserId,
 
   private def storeNotifications(nots: Seq[PushNotificationEncoded]): Future[Unit] =
     if (nots.nonEmpty) {
-      verbose(l"SYNC storeNotifications")
       for {
         _   <- fcmService.markNotificationsWithState(nots.map(_.id).toSet, Fetched)
         _   <- notificationStorage.saveAll(nots)
@@ -269,7 +264,7 @@ class PushServiceImpl(selfUserId:           UserId,
           val retry = Promise[Unit]()
 
           network.networkMode.onChanged.filter(!NetworkOff.contains(_)).next.map(_ => retry.trySuccess({}))
-          wsPushService.connected().onChanged.next.map(_ => retry.trySuccess({}))
+          wsPushService.connected.onChanged.next.map(_ => retry.trySuccess({}))
 
           for {
             _ <- CancellableFuture.delay(syncHistoryBackoff.delay(attempts))

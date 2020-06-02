@@ -30,15 +30,13 @@ import com.waz.log.LogShow.SafeToLog
 import com.waz.model.AccountData.Password
 import com.waz.model._
 import com.waz.service.backup.BackupManager
-import com.waz.service.tracking.LoggedOutEvent
 import com.waz.sync.client.AuthenticationManager.{AccessToken, Cookie}
-import com.waz.sync.client.{ErrorOr, LoginClient}
 import com.waz.sync.client.LoginClient.LoginResult
+import com.waz.sync.client.{ErrorOr, LoginClient}
 import com.waz.threading.Threading
 import com.waz.utils.events.{EventContext, EventStream, Signal}
 import com.waz.utils.{Serialized, returning, _}
 
-import scala.async.Async.{async, await}
 import scala.concurrent.Future
 import scala.reflect.io.Directory
 import scala.util.control.NonFatal
@@ -134,7 +132,8 @@ object AccountsService {
 
 }
 
-class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupManager) extends AccountsService with DerivedLogTag {
+class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupManager, val kotlinLogoutEnabled: Boolean = false)
+  extends AccountsService with DerivedLogTag {
   import AccountsService._
   import Threading.Implicits.Background
 
@@ -179,7 +178,7 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
   databasesRenamedPref().flatMap {
     case true => Future.successful({}) //databases have been renamed - nothing to do.
     case false =>
-      for {
+      (for {
         active <- prefs.preference(CurrentAccountPrefOld).apply()
         accs <- filterLatestDb(storageOld.list())
         _ <- Future.sequence(accs.filter(_.userId.isDefined).map { acc =>
@@ -212,7 +211,7 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
           verbose(l"DB migration successful?: $dbRenamed, cryptobox migration successful?: $cryptoBoxRenamed")
 
           //Ensure that the current active account remains active
-          if (active.contains(acc.id)) activeAccountPref := Some(userId) else Future.successful({})
+          if (active.contains(acc.id)) updateActiveAccountPref(Some(userId)) else Future.successful({})
         })
         //copy the client ids
         _ <- Future.sequence(accs.collect { case acc if acc.userId.isDefined =>
@@ -250,7 +249,11 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
           case true => accs.map(_.id).filterNot(active.contains)
         }.flatMap(storageOld.removeAll)
         _ <- markMigrationDone()
-      } yield {}
+      } yield {}).recoverWith {
+        case e: Exception =>
+          error(l"error migrating database from old accounts to new accounts $e")
+          Future.failed(e)
+      }
   }.recoverWith {
     case NonFatal(e) =>
       warn(l"Failed to migrate databases, aborting operation", e)
@@ -266,48 +269,72 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
   override val accountManagers = Signal[Set[AccountManager]]()
 
   //create account managers for all logged in accounts on app start, or initialise the signal to an empty set
-  for {
-    ids      <- storage.flatMap(_.list().map(_.map(_.id).toSet))
-    managers <- Future.sequence(ids.map(createAccountManager(_, None, None)))
-  } yield Serialized.future(AccountManagersKey)(Future[Unit](accountManagers ! managers.flatten))
+  calculateAccountManagers()
+
+  private var subscribeAccountPrefChanges = kotlinLogoutEnabled
+  // Normally, accountManagers is mutated through logout() call in this class, so we don't need to
+  // calculate it from scratch.
+  // In Kotlin mode, the logout process is not handled by this class, so we need to update it
+  // to notify the Scala dependants.
+  activeAccountPref.signal.onChanged.on(Threading.Background) { _ =>
+    if (subscribeAccountPrefChanges) calculateAccountManagers()
+  }
+
+  private def calculateAccountManagers() =
+    (for {
+       ids      <- storage.flatMap(_.list().map(_.map(_.id).toSet))
+       managers <- Future.sequence(ids.map(createAccountManager(_, None, None)))
+     } yield Serialized.future(AccountManagersKey)(Future[Unit](accountManagers ! managers.flatten))).recoverWith {
+       case e : Exception =>
+         error(l"error creating account managers $e")
+         Future.failed(e)
+     }
 
   override def createAccountManager(userId:         UserId,
                                     importDbFile:   Option[File],
                                     isLogin:        Option[Boolean],
                                     initialUser:    Option[UserInfo] = None,
                                     backupPassword: Option[Password] = None) = Serialized.future(AccountManagersKey) {
-    async {
-      if (importDbFile.nonEmpty)
-        returning(backupManager.importDatabase(userId, importDbFile.get, context.getDatabasePath(userId.toString).getParentFile, backupPassword = backupPassword)) { restore =>
-          if (restore.isFailure) global.trackingService.historyRestored(false) // HistoryRestoreSucceeded is sent from the new AccountManager
-        }.get // if the import failed this will rethrow the exception
+    for {
+      managers <- accountManagers.orElse(Signal.const(Set.empty[AccountManager])).head
+      manager  <- managers.find(_.userId == userId)
+                          .fold(createManager(userId, initialUser, isLogin, importDbFile.nonEmpty))(m => Future.successful(Some(m)))
+      _        = (manager, importDbFile, backupPassword) match {
+                   case (Some(mgr), Some(file), Some(password)) => restoreFromBackup(mgr, userId, file, password)
+                   case _ =>
+                 }
+    } yield manager
+  }
 
-      verbose(l"getOrCreateAccountManager: $userId")
-      val managers = await { accountManagers.orElse(Signal.const(Set.empty[AccountManager])).head }
-      val manager = managers.find(_.userId == userId)
-      if (manager.nonEmpty) {
-        warn(l"AccountManager for: $userId already created")
-        manager
-      } else {
-        verbose(l"No AccountManager for: $userId, creating new one")
-        val account = await(storage.flatMap(_.get(userId)))
-        val user = await {
-          for {
-            user <- prefs(LoggingInUser).apply().map(_.orElse(initialUser))
-            _    <- prefs(LoggingInUser) := None
-          } yield user
-        }
-        if (account.isEmpty) warn(l"No logged in account for user: $userId, not creating account manager")
-        account.map { acc =>
-          val newManager = new AccountManager(userId, acc.teamId, global, this, backupManager, startedJustAfterBackup = importDbFile.nonEmpty, user, isLogin)
-          if (isLogin.isDefined) {
-            accountManagers.mutateOrDefault(_ + newManager, Set(newManager))
-          }
-          newManager
-        }
-      }
+  private def restoreFromBackup(accountManager: AccountManager, userId: UserId, importDbFile: File, password: Password) = {
+    verbose(l"restore from backup")
+    val db = accountManager.storage.db2
+    db.beginTransaction()
+    try {
+      returning(backupManager.importDatabase(userId, importDbFile, context.getDatabasePath(userId.toString).getParentFile, backupPassword = password)) { restore =>
+        if (restore.isFailure) {
+          error(l"restore failed")
+          global.trackingService.historyRestored(false)
+        } // HistoryRestoreSucceeded is sent from the new AccountManager
+      }.get // if the import failed this will rethrow the exception
+      verbose(l"restore successful")
+      db.setTransactionSuccessful()
+    } finally {
+      db.endTransaction()
     }
   }
+
+  private def createManager(userId: UserId, initialUser: Option[UserInfo], isLogin: Option[Boolean], fromBackup: Boolean): Future[Option[AccountManager]] =
+    for {
+      account <- storage.flatMap(_.get(userId))
+      _       =  if (account.isEmpty) warn(l"No logged in account for user: $userId, not creating account manager")
+      user    <- if (account.isDefined) prefs(LoggingInUser).apply().map(_.orElse(initialUser)) else Future.successful(None)
+      _       <- if (account.isDefined) prefs(LoggingInUser) := None else Future.successful(())
+    } yield account.map { acc =>
+      val newManager = new AccountManager(userId, acc.teamId, global, this, backupManager, startedJustAfterBackup = fromBackup, user, isLogin)
+      if (isLogin.isDefined) accountManagers.mutateOrDefault(_ + newManager, Set(newManager))
+      newManager
+    }
 
   @volatile private var accountStateSignals = Map.empty[UserId, Signal[AccountState]]
   override def accountState(userId: UserId) = {
@@ -354,7 +381,6 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
     }).disableAutowiring()
 
   override def getZms(userId: UserId): Future[Option[ZMessaging]] = {
-    verbose(l"getZms: $userId")
     zmsInstances.head.map(_.find(_.selfUserId == userId))
   }
 
@@ -380,41 +406,35 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
     * Switches the current account to the given user id. If the other account cannot be authorized
     * (no cookie) or if anything else goes wrong, we leave the user logged out.
     */
-  override def setAccount(userId: Option[UserId]) = {
-    verbose(l"setAccount: $userId")
-    userId match {
-      case Some(id) =>
-        activeAccountId.head.flatMap {
-          case Some(cur) if cur == id => Future.successful({})
+  override def setAccount(userId: Option[UserId]) = userId match {
+    case Some(id) =>
+      activeAccountId.head.flatMap {
+        case Some(cur) if cur == id => Future.successful({})
           case Some(_)   => accountManagers.head.map(_.find(_.userId == id)).flatMap {
-            case Some(_) => activeAccountPref := Some(id)
+            case Some(_) => updateActiveAccountPref(Some(id))
             case _ =>
               warn(l"Tried to set active user who is not logged in: $userId, not changing account")
               Future.successful({})
           }
-          case _ => activeAccountPref := Some(id)
+          case _ => updateActiveAccountPref(Some(id))
         }
-      case None => activeAccountPref := None
-    }
+    case None => updateActiveAccountPref(None)
   }
 
   def requestVerificationEmail(email: EmailAddress) =
     regClient.requestVerificationEmail(email)
 
   override def requestPhoneCode(phone: PhoneNumber, login: Boolean, call: Boolean = false) = {
-    verbose(l"requestPhoneConfirmationCode: $phone, login=$login, call=$call")
     phoneNumbers.normalize(phone).flatMap { normalizedPhone =>
       regClient.requestPhoneCode(normalizedPhone.getOrElse(phone), login, call)
     }
   }
 
   override def requestEmailCode(email: EmailAddress) = {
-    verbose(l"requestEmailConfirmationCode: $email")
     regClient.requestEmailCode(email)
   }
 
   override def verifyPhoneNumber(phone: PhoneNumber, code: ConfirmationCode, dryRun: Boolean) = {
-    verbose(l"verifyPhoneNumber: $phone, $code, $dryRun")
     phoneNumbers.normalize(phone).flatMap { normalizedPhone =>
       regClient.verifyRegistrationMethod(Left(normalizedPhone.getOrElse(phone)), code, dryRun).map(_.fold(Left(_), _ => Right({})))
       //TODO handle label and cookie!(https://github.com/wireapp/android-project/issues/51)
@@ -422,13 +442,11 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
   }
 
   override def verifyEmailAddress(email: EmailAddress, code: ConfirmationCode, dryRun: Boolean = true) = {
-    verbose(l"verifyEmailAddress: $email, $code, $dryRun")
     regClient.verifyRegistrationMethod(Right(email), code, dryRun).map(_.fold(Left(_), _ => Right({})))
     //TODO handle label and cookie! (https://github.com/wireapp/android-project/issues/51)
   }
 
   override def login(loginCredentials: Credentials) = {
-    verbose(l"login: $loginCredentials")
     loginClient.login(loginCredentials).flatMap {
       case Right(LoginResult(token, Some(cookie), _)) => //TODO handle label (https://github.com/wireapp/android-project/issues/51)
         loginClient.getSelfUserInfo(token).flatMap {
@@ -448,7 +466,6 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
   }
 
   override def register(registerCredentials: Credentials, name: Name, teamName: Option[Name] = None) = {
-    verbose(l"register: $registerCredentials, name: $name, teamName: $teamName")
     regClient.register(registerCredentials, name, teamName).flatMap {
       case Right((user, Some((cookie, _)))) =>
         for {
@@ -466,8 +483,7 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
     }
   }
 
-  private def addAccountEntry(user: UserInfo, cookie: Cookie, token: Option[AccessToken], credentials: Option[Credentials]): Future[Unit] = {
-    verbose(l"addAccountEntry: $user, $cookie, $token, $credentials")
+  private def addAccountEntry(user: UserInfo, cookie: Cookie, token: Option[AccessToken], credentials: Option[Credentials]): Future[Unit] =
     storage.flatMap(
       _.updateOrCreate(
         user.id,
@@ -480,10 +496,8 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
         AccountData(user.id, user.teamId, cookie, token, password = credentials.flatMap(_.maybePassword), ssoId = user.ssoId)
       )
     ).map(_ => {})
-  }
 
-  override def ssoLogin(userId: UserId, cookie: Cookie): Future[Either[ErrorResponse, (HasOtherClients, HadDB)]] = {
-    verbose(l"login: $userId $cookie")
+  override def ssoLogin(userId: UserId, cookie: Cookie): Future[Either[ErrorResponse, (HasOtherClients, HadDB)]] =
     loginClient.access(cookie, None).flatMap {
       case Right(loginResult) =>
         loginClient.getSelfUserInfo(loginResult.accessToken).flatMap {
@@ -503,7 +517,6 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
         verbose(l"login - access error: $error")
         Future.successful(Left(error))
     }
-  }
 
   override def wipeDataForAllAccounts(): Future[Unit] = {
     def delete(file: File) =
@@ -552,6 +565,15 @@ class AccountsServiceImpl(val global: GlobalModule, val backupManager: BackupMan
     //a potential race condition between us clearing the logs and logging out
     returning(logsService.setLogsEnabled(false)) { _ => InternalLog.clearAll()}
   }
+
+  private def updateActiveAccountPref(newPref: Option[UserId]): Future[Unit] =
+    if (!kotlinLogoutEnabled) {
+      activeAccountPref := newPref
+    } else {
+      //let's not retrigger ourselves for no reason
+      subscribeAccountPrefChanges = false
+      (activeAccountPref := newPref).map(_ => subscribeAccountPrefChanges = true)
+    }
 
 }
 

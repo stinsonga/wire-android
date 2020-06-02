@@ -22,7 +22,7 @@ import java.net.URI
 
 import android.Manifest.permission.READ_EXTERNAL_STORAGE
 import android.content.Intent
-import android.graphics.{Bitmap, BitmapFactory}
+import android.graphics.Bitmap
 import android.hardware.{Sensor, SensorManager}
 import android.os.Bundle
 import androidx.appcompat.widget.Toolbar
@@ -31,7 +31,7 @@ import android.widget.{FrameLayout, TextView}
 import com.waz.api.MemoryImageCache
 import com.waz.model._
 import com.waz.permissions.PermissionsService
-import com.waz.service.assets2.{AssetService, Content, UriHelper}
+import com.waz.service.assets.{AssetService, Content, UriHelper}
 import com.waz.threading.Threading
 import com.waz.utils.events.Signal
 import com.waz.utils.returning
@@ -594,11 +594,11 @@ class DrawingFragment extends FragmentHelper
     for {
       is     <- input match {
                   case Left(content)  =>
-                    Future.fromTry(content.openInputStream(uriHelper))
+                    Future.successful(content.assetInput(uriHelper))
                   case Right(assetId) =>
                     inject[Signal[AssetService]].head.flatMap(_.loadContentById(assetId).future)
                 }
-      bitmap =  BitmapFactory.decodeStream(is)
+      bitmap <- Future.fromTry(is.toBitmap)
       cv     <- drawingCanvasView
       tip    <- drawingViewTip
       bg     <- drawingTipBackground
