@@ -1,8 +1,8 @@
-package com.waz.zclient.feature.auth.registration.personal.email
+package com.waz.zclient.feature.auth.registration.personal.pincode
 
+import android.app.AlertDialog
 import android.os.Bundle
 import android.view.View
-import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.observe
 import com.poovam.pinedittextfield.PinField.OnTextCompleteListener
@@ -12,14 +12,15 @@ import com.waz.zclient.core.extension.sharedViewModel
 import com.waz.zclient.core.extension.showKeyboard
 import com.waz.zclient.core.extension.viewModel
 import com.waz.zclient.feature.auth.registration.di.REGISTRATION_SCOPE_ID
+import com.waz.zclient.feature.auth.registration.personal.email.EmailCredentialsViewModel
+import com.waz.zclient.feature.auth.registration.personal.name.CreatePersonalAccountNameFragment
 import kotlinx.android.synthetic.main.fragment_create_personal_account_pin_code.*
 
 class CreatePersonalAccountPinCodeFragment : Fragment(
     R.layout.fragment_create_personal_account_pin_code
 ) {
 
-    //TODO handle no internet connections status
-    private val createPersonalAccountWithEmailViewModel: CreatePersonalAccountWithEmailViewModel
+    private val createPersonalAccountPinCodeViewModel: CreatePersonalAccountPinCodeViewModel
         by viewModel(REGISTRATION_SCOPE_ID)
 
     private val emailCredentialsViewModel: EmailCredentialsViewModel
@@ -31,6 +32,8 @@ class CreatePersonalAccountPinCodeFragment : Fragment(
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         observeActivateEmailData()
+        observeActivationCodeData()
+        observeNetworkConnectionError()
         initChangeMailListener()
         initDescriptionTextView()
         initResendCodeListener()
@@ -45,21 +48,21 @@ class CreatePersonalAccountPinCodeFragment : Fragment(
 
     private fun initResendCodeListener() {
         createPersonalAccountPinCodeResendCodeTextView.setOnClickListener {
-            createPersonalAccountWithEmailViewModel.sendActivationCode(email)
+            createPersonalAccountPinCodeViewModel.sendActivationCode(email)
         }
     }
 
     private fun initPinCodeListener() {
         createPersonalAccountPinCodePinEditText.onTextCompleteListener = object : OnTextCompleteListener {
             override fun onTextComplete(code: String): Boolean {
-                createPersonalAccountWithEmailViewModel.activateEmail(email, code)
-                return true
+                createPersonalAccountPinCodeViewModel.activateEmail(email, code)
+                return false
             }
         }
     }
 
     private fun observeActivateEmailData() {
-        with(createPersonalAccountWithEmailViewModel) {
+        with(createPersonalAccountPinCodeViewModel) {
             activateEmailSuccessLiveData.observe(viewLifecycleOwner) {
                 emailCredentialsViewModel.saveActivationCode(
                     createPersonalAccountPinCodePinEditText.text.toString()
@@ -67,9 +70,20 @@ class CreatePersonalAccountPinCodeFragment : Fragment(
                 showEnterNameScreen()
             }
             activateEmailErrorLiveData.observe(viewLifecycleOwner) {
-                showInvalidCodeError(getString(it.errorMessage))
+                showGenericErrorDialog(it.message)
                 clearPinCode()
                 showKeyboard()
+            }
+        }
+    }
+
+    private fun observeActivationCodeData() {
+        with(createPersonalAccountPinCodeViewModel) {
+            sendActivationCodeSuccessLiveData.observe(viewLifecycleOwner) {
+                //TODO show correctly send activation code success messages
+            }
+            sendActivationCodeErrorLiveData.observe(viewLifecycleOwner) {
+                showGenericErrorDialog(it.message)
             }
         }
     }
@@ -81,12 +95,6 @@ class CreatePersonalAccountPinCodeFragment : Fragment(
         )
     }
 
-    private fun showInvalidCodeError(errorMessage: String) = AlertDialog.Builder(requireActivity())
-        .setMessage(errorMessage)
-        .setPositiveButton(android.R.string.ok) { dialog, _ -> dialog.dismiss() }
-        .create()
-        .show()
-
     private fun clearPinCode() = createPersonalAccountPinCodePinEditText.text?.clear()
 
     private fun initChangeMailListener() {
@@ -94,6 +102,25 @@ class CreatePersonalAccountPinCodeFragment : Fragment(
             requireActivity().onBackPressed()
         }
     }
+
+    private fun observeNetworkConnectionError() {
+        createPersonalAccountPinCodeViewModel.networkConnectionErrorLiveData.observe(viewLifecycleOwner) {
+            showNetworkConnectionErrorDialog()
+        }
+    }
+
+    private fun showNetworkConnectionErrorDialog() = AlertDialog.Builder(context)
+        .setTitle(R.string.no_internet_connection_title)
+        .setMessage(R.string.no_internet_connection_message)
+        .setPositiveButton(android.R.string.ok) { _, _ -> }
+        .create()
+        .show()
+
+    private fun showGenericErrorDialog(messageResId: Int) = AlertDialog.Builder(context)
+        .setMessage(messageResId)
+        .setPositiveButton(android.R.string.ok) { _, _ -> }
+        .create()
+        .show()
 
     companion object {
         fun newInstance() = CreatePersonalAccountPinCodeFragment()

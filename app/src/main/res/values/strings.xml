@@ -300,6 +300,11 @@
     <string name="call_banner_incoming_group">%1$s \u30FB %2$s is calling…</string>
     <string name="call_banner_tap_to_return_to_call">Tap to return to call \u30FB %1$s</string>
 
+    <string name="call_error_unsupported_version_title">Please update Wire</string>
+    <string name="call_error_unsupported_version_message">You received a call that isn\'t supported by this version of Wire.\n\nGet the latest version in the Play Store.</string>
+    <string name="call_error_unsupported_version_button_ok">Go to Play Store</string>
+    <string name="call_error_unsupported_version_button_dismiss">Later</string>
+
     <string name="calling_ongoing_call_title">Ongoing call</string>
 
     <string name="calling_ongoing_call_start_message">A call is active in another conversation.\nCalling here will hang up the other call.</string>
@@ -1449,6 +1454,9 @@
     <string name="delete_group_conversation_error_message">An error occurred while trying to delete the group. Please try again.</string>
     <string name="delete_group_conversation_error_message_with_group_name">An error occurred while trying to delete the group %1$s. Please try again.</string>
 
+    <!-- No Internet Connection -->
+    <string name="no_internet_connection_title">No Internet Connection</string>
+    <string name="no_internet_connection_message">Please check your Internet connection and try again</string>
 
     <!-- Shortcuts -->
     <string name="shortcut_create_group_label">Create Group</string>
