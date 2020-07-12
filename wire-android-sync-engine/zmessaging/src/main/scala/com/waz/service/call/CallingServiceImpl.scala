@@ -36,7 +36,6 @@ import com.waz.service._
 import com.waz.service.call.Avs.AvsClosedReason.{StillOngoing, reasonString}
 import com.waz.service.call.Avs.VideoState._
 import com.waz.service.call.Avs.{AvsCallError, AvsClosedReason, NetworkQuality, VideoState, WCall}
-import com.waz.service.call.CallInfo.{CallState, Participant}
 import com.waz.service.call.CallInfo.CallState._
 import com.waz.service.call.CallInfo.{CallState, Participant}
 import com.waz.service.call.CallingService.GlobalCallProfile
@@ -46,11 +45,11 @@ import com.waz.service.push.PushService
 import com.waz.service.tracking.{AVSMetricsEvent, TrackingService}
 import com.waz.sync.client.CallingClient
 import com.waz.sync.otr.OtrSyncHandler
-import com.waz.threading.SerialDispatchQueue
-import com.waz.utils.events._
+import com.wire.signals._
 import com.waz.utils.wrappers.Context
-import com.waz.utils.{RichInstant, Serialized, returning, returningF}
+import com.waz.utils.{RichInstant, returning, returningF}
 import org.threeten.bp.Duration
+import org.threeten.bp.temporal.ChronoUnit
 
 import scala.collection.immutable.ListSet
 import scala.concurrent.{Future, Promise}
@@ -110,7 +109,8 @@ trait CallingService {
 
 object CallingService {
 
-  val VideoCallMaxMembers: Int = 4
+  var VideoCallMaxMembers: Int = 4
+  def videoCallMaxMembersExcludingSelf: Int = VideoCallMaxMembers - 1
 
   trait AbstractCallProfile[A] {
 
@@ -169,7 +169,8 @@ class CallingServiceImpl(val accountId:       UserId,
                          globalPrefs:         GlobalPreferences,
                          permissions:         PermissionsService,
                          userStorage:         UsersStorage,
-                         tracking:            TrackingService)(implicit accountContext: AccountContext) extends CallingService with DerivedLogTag with SafeToLog { self =>
+                         tracking:            TrackingService,
+                         conferenceCallingEnabled: Boolean)(implicit accountContext: AccountContext) extends CallingService with DerivedLogTag with SafeToLog { self =>
 
   import CallingService._
 
@@ -213,6 +214,15 @@ class CallingServiceImpl(val accountId:       UserId,
   def onSend(ctx: Pointer, convId: RConvId, userId: UserId, clientId: ClientId, msg: String): Future[Unit] =
     withConv(convId) { (_, conv) =>
       sendCallMessage(conv.id, GenericMessage(Uid(), GenericContent.Calling(msg)), ctx)
+    }
+
+  def onSftRequest(ctx: Pointer, url: String, data: String): Unit =
+    callingClient.connectToSft(url, data).future.foreach {
+      case Left(responseError) =>
+        error(l"Could not connect to sft server", responseError)
+        wCall.foreach(avs.onSftResponse(_, None, ctx))
+      case Right(responseData) =>
+        wCall.foreach(avs.onSftResponse(_, Some(responseData), ctx))
     }
 
   /**
@@ -390,6 +400,16 @@ class CallingServiceImpl(val accountId:       UserId,
   def onNetworkQualityChanged(convId: ConvId, participant: Participant, quality: NetworkQuality): Future[Unit] =
     Future.successful(())
 
+  def onClientsRequest(convId: ConvId): Future[Unit] =
+    withConv(convId) { (wCall, conv) =>
+      otrSyncHandler.postClientDiscoveryMessage(convId).map {
+        case Right(clients) =>
+          avs.onClientsRequest(wCall, conv.remoteId, clients)
+        case Left(errorResponse) =>
+          warn(l"Could not post client discovery message: $errorResponse")
+      }
+    }
+
   override def startCall(convId: ConvId, isVideo: Boolean = false, forceOption: Boolean = false) =
     Serialized.future(self) {
       verbose(l"startCall $convId, isVideo: $isVideo, forceOption: $forceOption")
@@ -404,7 +424,10 @@ class CallingServiceImpl(val accountId:       UserId,
           if (convSize > VideoCallMaxMembers) Avs.WCallType.ForcedAudio
           else if (isVideo) Avs.WCallType.Video
           else Avs.WCallType.Normal
-        convType = if (isGroup) Avs.WCallConvType.Group else Avs.WCallConvType.OneOnOne
+        convType =
+          if (isGroup && conferenceCallingEnabled) Avs.WCallConvType.Conference
+          else if (isGroup && !conferenceCallingEnabled) Avs.WCallConvType.Group
+          else Avs.WCallConvType.OneOnOne
         _ <- permissions.ensurePermissions(ListSet(android.Manifest.permission.RECORD_AUDIO) ++ (if(forceOption && isVideo) ListSet(android.Manifest.permission.CAMERA) else ListSet()))
         _ <-
           profile.activeCall match {
@@ -529,11 +552,16 @@ class CallingServiceImpl(val accountId:       UserId,
 
   private def receiveCallEvent(msg: String, msgTime: RemoteInstant, convId: RConvId, from: UserId, sender: ClientId): Unit =
     wCall.map { w =>
+      import CallingServiceImpl._
+
       val drift = pushService.beDrift.currentValue.getOrElse(Duration.ZERO)
       val curTime = LocalInstant(clock.instant + drift)
       verbose(l"Received msg for avs: localTime: ${clock.instant} curTime: $curTime, drift: $drift, msgTime: $msgTime")
-      avs.onReceiveMessage(w, msg, curTime, msgTime, convId, from, sender).foreach { result =>
-        userPrefs(UserPreferences.ShouldWarnAVSUpgrade).mutate(_ | result == AvsCallError.UnknownProtocol)
+      avs.onReceiveMessage(w, msg, curTime, msgTime, convId, from, sender).foreach {
+        case AvsCallError.UnknownProtocol if shouldTriggerAlert(convId) =>
+          instantOfLastErrorByConversationId += convId -> LocalInstant.Now
+          userPrefs(UserPreferences.ShouldWarnAVSUpgrade) := true
+        case _ => // Ignore
       }
     }
 
@@ -618,4 +646,18 @@ class CallingServiceImpl(val accountId:       UserId,
   }
 }
 
+object CallingServiceImpl {
 
+  /// AVS error alerts are rate limited so that they occur once within a 15 minute interval
+  /// per conversation.
+
+  private var instantOfLastErrorByConversationId = Map[RConvId, LocalInstant]()
+
+  private def shouldTriggerAlert(convId: RConvId): Boolean = {
+    val instantOfLastError = instantOfLastErrorByConversationId.getOrElse(convId, LocalInstant.Epoch).instant
+    val secondsSinceLastError = instantOfLastError.until(LocalInstant.Now.instant, ChronoUnit.SECONDS)
+    val moreThan15MinutesHavePassed = secondsSinceLastError > 60 * 15
+    moreThan15MinutesHavePassed
+  }
+
+}

@@ -40,9 +40,10 @@ import com.waz.service.messages.{MessagesContentUpdater, MessagesService}
 import com.waz.service.tracking.TrackingService
 import com.waz.sync.SyncServiceHandle
 import com.waz.sync.client.{ConversationsClient, ErrorOr}
-import com.waz.threading.{CancellableFuture, Threading}
+import com.wire.signals.CancellableFuture
+import com.waz.threading.Threading
 import com.waz.utils._
-import com.waz.utils.events.EventStream
+import com.wire.signals.EventStream
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -75,6 +76,8 @@ trait ConversationsUiService {
   def setConversationArchived(id: ConvId, archived: Boolean): Future[Option[ConversationData]]
   def setConversationMuted(id: ConvId, muted: MuteSet): Future[Option[ConversationData]]
   def setConversationName(id: ConvId, name: Name): Future[Option[ConversationData]]
+
+  def addRestrictedFileMessage(convId: ConvId, from: Option[UserId] = None, extension: Option[String] = None): Future[Option[MessageData]]
 
   def addConversationMembers(conv: ConvId, members: Set[UserId], defaultRole: ConversationRole): Future[Option[SyncId]]
   def removeConversationMember(conv: ConvId, user: UserId): Future[Option[SyncId]]
@@ -279,6 +282,9 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
     }
   }
 
+  override def addRestrictedFileMessage(convId: ConvId, from: Option[UserId] = None, extension: Option[String] = None): Future[Option[MessageData]]
+    = messages.addRestrictedFileMessage(convId, from, extension)
+
   override def addConversationMembers(conv: ConvId, users: Set[UserId], defaultRole: ConversationRole): Future[Option[SyncId]] =
     (for {
       true      <- canModifyMembers(conv)
@@ -302,7 +308,7 @@ class ConversationsUiServiceImpl(selfUserId:        UserId,
       toDelete <- if (user != selfUserId) members.getByUsers(Set(user)).map(_.isEmpty)
                   else Future.successful(false)
       _        <- if (toDelete) usersStorage.remove(user) else Future.successful(())
-      _        <- messages.addMemberLeaveMessage(conv, selfUserId, user)
+      _        <- messages.addMemberLeaveMessage(conv, selfUserId, Set(user))
       syncId   <- sync.postConversationMemberLeave(conv, user)
     } yield Option(syncId))
       .recover {

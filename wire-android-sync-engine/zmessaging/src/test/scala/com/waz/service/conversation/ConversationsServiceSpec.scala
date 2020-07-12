@@ -25,15 +25,14 @@ import com.waz.model.{ConversationData, ConversationRole, _}
 import com.waz.service._
 import com.waz.service.assets.AssetService
 import com.waz.service.messages.{MessagesContentUpdater, MessagesService}
-import com.waz.service.push.{NotificationService, PushService}
+import com.waz.service.push.{NotificationService, PushService, BgEventSource}
 import com.waz.service.teams.{TeamsService, TeamsServiceImpl}
 import com.waz.specs.AndroidFreeSpec
 import com.waz.sync.client.ConversationsClient
 import com.waz.sync.client.ConversationsClient.ConversationResponse
 import com.waz.sync.{SyncRequestService, SyncResult, SyncServiceHandle}
 import com.waz.testutils.{TestGlobalPreferences, TestUserPreferences}
-import com.waz.threading.CancellableFuture
-import com.waz.utils.events.{BgEventSource, EventStream, Signal, SourceSignal}
+import com.wire.signals.{CancellableFuture, EventStream, Signal, SourceSignal}
 import org.json.JSONObject
 import org.threeten.bp.Instant
 
@@ -123,7 +122,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
   (membersStorage.onUpdated _).expects().anyNumberOfTimes().returning(EventStream())
   (membersStorage.onDeleted _).expects().anyNumberOfTimes().returning(EventStream())
   (selectedConv.selectedConversationId _).expects().anyNumberOfTimes().returning(Signal.const(None))
-  (push.onHistoryLost _).expects().anyNumberOfTimes().returning(new SourceSignal[Instant] with BgEventSource)
+  (push.onHistoryLost _).expects().anyNumberOfTimes().returning(new SourceSignal[Instant] with BgEventSource[Instant])
   (errors.onErrorDismissed _).expects(*).anyNumberOfTimes().returning(CancellableFuture.successful(()))
 
   (sync.syncTeam _).expects(*).anyNumberOfTimes().returning(Future.successful(SyncId()))
@@ -150,6 +149,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
       val events = Seq(
         MemberLeaveEvent(rConvId, RemoteInstant.ofEpochSec(10000), selfUserId, Seq(selfUserId))
       )
+      (users.syncIfNeeded _).expects(*, *).anyNumberOfTimes().returning(Future.successful(None))
 
       // check if the self is still in any conversation (they are - with self)
       (membersStorage.getByUsers _).expects(Set(selfUserId)).anyNumberOfTimes().returning(
@@ -166,7 +166,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
         .anyNumberOfTimes().returning(Future.successful(Set[ConversationMemberData]()))
       (content.setConvActive _).expects(*, *).anyNumberOfTimes().returning(Future.successful(()))
       (convsStorage.optSignal _).expects(convId).anyNumberOfTimes().returning(Signal.const(Some(convData)))
-      (messages.addMemberLeaveMessage _).expects(convId, selfUserId, selfUserId).atLeastOnce().returning(
+      (messages.addMemberLeaveMessage _).expects(convId, selfUserId, Set(selfUserId)).atLeastOnce().returning(
         Future.successful(())
       )
       (convsStorage.get _).expects(convId).anyNumberOfTimes().returning(Future.successful(Some(convData)))
@@ -200,6 +200,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
         MemberLeaveEvent(rConvId, RemoteInstant.ofEpochSec(10000), removerId, Seq(selfUserId))
       )
 
+      (users.syncIfNeeded _).expects(*, *).anyNumberOfTimes().returning(Future.successful(None))
       (membersStorage.getByUsers _).expects(Set(selfUserId)).anyNumberOfTimes().returning(
         Future.successful(IndexedSeq(ConversationMemberData(selfUserId, convId, ConversationRole.AdminRole)))
       )
@@ -210,7 +211,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
         .anyNumberOfTimes().returning(Future.successful(Set[ConversationMemberData]()))
       (content.setConvActive _).expects(*, *).anyNumberOfTimes().returning(Future.successful(()))
       (convsStorage.optSignal _).expects(convId).anyNumberOfTimes().returning(Signal.const(Some(convData)))
-      (messages.addMemberLeaveMessage _).expects(convId, removerId, selfUserId).atLeastOnce().returning(
+      (messages.addMemberLeaveMessage _).expects(convId, removerId, Set(selfUserId)).atLeastOnce().returning(
         Future.successful(())
       )
       (convsStorage.get _).expects(convId).anyNumberOfTimes().returning(Future.successful(Some(convData)))
@@ -245,6 +246,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
         MemberLeaveEvent(rConvId, RemoteInstant.ofEpochSec(10000), selfUserId, Seq(otherUserId))
       )
 
+      (users.syncIfNeeded _).expects(Set(otherUserId), *).anyNumberOfTimes().returning(Future.successful(None))
       (membersStorage.getByUsers _).expects(Set(otherUserId)).anyNumberOfTimes().returning(
         Future.successful(IndexedSeq(ConversationMemberData(otherUserId, convId, ConversationRole.MemberRole)))
       )
@@ -257,7 +259,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
       (messages.getAssetIds _).expects(*).anyNumberOfTimes().returning(Future.successful(Set.empty))
       (assets.deleteAll _).expects(*).anyNumberOfTimes().returning(Future.successful(()))
       (convsStorage.optSignal _).expects(convId).anyNumberOfTimes().returning(Signal.const(Some(convData)))
-      (messages.addMemberLeaveMessage _).expects(convId, selfUserId, otherUserId).atLeastOnce().returning(
+      (messages.addMemberLeaveMessage _).expects(convId, selfUserId, Set(otherUserId)).atLeastOnce().returning(
         Future.successful(())
       )
       (membersStorage.getActiveUsers _).expects(convId).anyNumberOfTimes().returning(
@@ -766,6 +768,7 @@ class ConversationsServiceSpec extends AndroidFreeSpec {
       (membersStorage.getByConv _).expects(convId).anyNumberOfTimes().onCall { _: ConvId => members.head }
       (membersStorage.onChanged _).expects().anyNumberOfTimes().onCall(_ => EventStream.wrap(membersOnChanged))
       (users.userNames _).expects().anyNumberOfTimes().returning(Signal.const(userNames))
+      (users.syncIfNeeded _).expects(*, *).anyNumberOfTimes().returning(Future.successful(None))
       (content.convByRemoteId _).expects(rConvId).anyNumberOfTimes().returning(convSignal.head)
       (membersStorage.remove(_: ConvId, _:Iterable[UserId])).expects(convId, *).anyNumberOfTimes().onCall { (_: ConvId, userIds: Iterable[UserId]) =>
         members.head.map { ms =>

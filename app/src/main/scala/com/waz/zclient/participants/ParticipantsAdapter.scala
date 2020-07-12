@@ -33,7 +33,8 @@ import com.waz.content.UsersStorage
 import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model._
 import com.waz.service.SearchQuery
-import com.waz.utils.events._
+import com.waz.service.call.CallingService
+import com.wire.signals._
 import com.waz.utils.returning
 import com.waz.zclient.common.controllers.ThemeController
 import com.waz.zclient.common.controllers.ThemeController.Theme
@@ -49,6 +50,7 @@ import com.waz.zclient.utils.{RichView, ViewUtils}
 import com.waz.zclient.{Injectable, Injector, R}
 
 import scala.concurrent.duration._
+import com.waz.threading.Threading._
 
 class ParticipantsAdapter(participants:    Signal[Map[UserId, ConversationRole]],
                           maxParticipants: Option[Int] = None,
@@ -89,9 +91,8 @@ class ParticipantsAdapter(participants:    Signal[Map[UserId, ConversationRole]]
     selfId       <- selfId
     usersStorage <- usersStorage
     tId          <- team
-    convId       <- convController.currentConvId
     participants <- participants
-    users        <- usersStorage.listSignal(participants.keys.toList)
+    users        <- usersStorage.listSignal(participants.keys)
     f            <- filter
   } yield
     users
@@ -448,7 +449,7 @@ object ParticipantsAdapter {
         Selection.removeSelection(editText.getText)
       }
 
-      callInfo.setText(if (isTeam) getString(R.string.call_info_text, ConversationController.MaxParticipants.toString) else getString(R.string.empty_string))
+      callInfo.setText(if (isTeam) getString(R.string.call_info_text, ConversationController.MaxParticipants.toString, CallingService.videoCallMaxMembersExcludingSelf.toString) else getString(R.string.empty_string))
       callInfo.setMarginTop(getDimenPx(if (isTeam) R.dimen.wire__padding__16 else R.dimen.wire__padding__8)(view.getContext))
       callInfo.setMarginBottom(getDimenPx(if (isTeam) R.dimen.wire__padding__16 else R.dimen.wire__padding__8)(view.getContext))
 

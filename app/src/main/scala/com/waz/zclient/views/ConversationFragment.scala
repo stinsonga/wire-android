@@ -38,8 +38,9 @@ import com.waz.permissions.PermissionsService
 import com.waz.service.ZMessaging
 import com.waz.service.assets.{Content, ContentForUpload}
 import com.waz.service.call.CallingService
-import com.waz.threading.{CancellableFuture, Threading}
-import com.waz.utils.events.{EventStreamWithAuxSignal, Signal}
+import com.wire.signals.CancellableFuture
+import com.waz.threading.Threading
+import com.wire.signals.{EventStreamWithAuxSignal, Signal}
 import com.waz.utils.wrappers.{URI => URIWrapper}
 import com.waz.utils.{returning, returningF}
 import com.waz.zclient.Intents.ShowDevicesIntent
@@ -79,11 +80,12 @@ import com.waz.zclient.ui.text.TypefaceTextView
 import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.{RichView, ViewUtils}
 import com.waz.zclient.views.e2ee.ShieldView
-import com.waz.zclient.{ErrorsController, FragmentHelper, R}
+import com.waz.zclient.{BuildConfig, ErrorsController, FragmentHelper, R}
 
 import scala.collection.immutable.ListSet
 import scala.concurrent.Future
 import scala.concurrent.duration._
+import com.waz.threading.Threading._
 
 class ConversationFragment extends FragmentHelper {
   import ConversationFragment._
@@ -116,7 +118,7 @@ class ConversationFragment extends FragmentHelper {
   private lazy val cameraController           = inject[ICameraController]
   private lazy val confirmationController     = inject[IConfirmationController]
 
-  private var subs = Set.empty[com.waz.utils.events.Subscription]
+  private var subs = Set.empty[com.wire.signals.Subscription]
 
   private val previewShown = Signal(false)
   private lazy val convChange = convController.convChanged.filter { _.to.isDefined }
@@ -218,7 +220,7 @@ class ConversationFragment extends FragmentHelper {
     } yield {
       if (isCallActive || !isConvActive || participantsNumber <= 1)
         Option.empty[Int]
-      else if (!isGroup || (isTeam && participantsNumber <= CallingService.VideoCallMaxMembers))
+      else if (!isGroup || ((isTeam || BuildConfig.CONFERENCE_CALLING) && participantsNumber <= CallingService.VideoCallMaxMembers))
         Some(R.menu.conversation_header_menu_video)
       else
         Some(R.menu.conversation_header_menu_audio)

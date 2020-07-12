@@ -33,6 +33,7 @@ import scala.util.control.NoStackTrace
 
 trait TeamsSyncHandler {
   def syncTeam(): Future[SyncResult]
+  def syncTeamData(): Future[SyncResult]
   def syncMember(id: UserId): Future[SyncResult]
   def syncSelfPermissions(): Future[SyncResult]
   def deleteConversations(tId: TeamId, convId: RConvId): Future[SyncResult]
@@ -64,6 +65,15 @@ class TeamsSyncHandlerImpl(userId:    UserId,
         _           <- service.onTeamSynced(data, members, roles)
       } yield SyncResult.Success).recover {
         case err: ErrorResponse => SyncResult(err)
+      }
+  }
+
+  override def syncTeamData(): Future[SyncResult] = teamId match {
+    case None     => Future.successful(SyncResult.Success)
+    case Some(id) =>
+      client.getTeamData(id).future.flatMap {
+        case Right(data) => service.onTeamUpdated(data).map(_ => SyncResult.Success)
+        case Left(err)   => Future.successful(SyncResult(err))
       }
   }
 

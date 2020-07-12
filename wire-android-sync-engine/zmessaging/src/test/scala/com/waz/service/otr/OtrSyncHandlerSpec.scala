@@ -31,7 +31,7 @@ import com.waz.sync.client.OtrClient.{ClientMismatch, EncryptedContent, MessageR
 import com.waz.sync.client.{MessagesClient, OtrClient}
 import com.waz.sync.otr.OtrSyncHandler.OtrMessage
 import com.waz.sync.otr.{OtrClientsSyncHandler, OtrSyncHandlerImpl}
-import com.waz.threading.CancellableFuture
+import com.wire.signals.CancellableFuture
 
 import scala.concurrent.Future
 
@@ -209,6 +209,32 @@ class OtrSyncHandlerSpec extends AndroidFreeSpec {
 
     val sh = getSyncHandler
     result(sh.postOtrMessage(conv.id, msg))
+  }
+
+  scenario("Fetch clients through client discovery message") {
+    val conv = ConversationData(ConvId("conv-id"), RConvId("r-conv-id"))
+    val encryptedContent = EncryptedContent.Empty
+
+    val missingClients: Map[UserId, Seq[ClientId]] = Map(
+      UserId("user1") -> Seq(ClientId("client1"), ClientId("client2")),
+      UserId("user2") -> Seq(ClientId("client1"), ClientId("client2"))
+    )
+
+    (convStorage.get _)
+      .expects(conv.id)
+      .returning(Future.successful(Some(conv)))
+
+    (msgClient.postMessage _)
+      .expects(conv.remoteId, OtrMessage(selfClientId, encryptedContent, nativePush = false), *)
+      .returning(CancellableFuture.successful(Right(MessageResponse.Success(
+        ClientMismatch(
+          missing = missingClients,
+          time = RemoteInstant.Epoch
+        )
+      ))))
+
+    val sh = getSyncHandler
+    result(sh.postClientDiscoveryMessage(conv.id)) shouldEqual Right(missingClients)
   }
 
   def getSyncHandler = {

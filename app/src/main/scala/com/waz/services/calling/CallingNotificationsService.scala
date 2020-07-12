@@ -24,6 +24,7 @@ import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.service.ZMessaging
 import com.waz.zclient.ServiceHelper
 import com.waz.zclient.notifications.controllers.CallingNotificationsController
+import com.waz.threading.Threading._
 
 class CallingNotificationsService extends ServiceHelper with DerivedLogTag {
 
@@ -39,7 +40,6 @@ class CallingNotificationsService extends ServiceHelper with DerivedLogTag {
       startForeground(not.convId.str.hashCode, builder.build())
     case _ =>
       stopForeground(true)
-      stopSelf()
   }
 
   override def onBind(intent: Intent): IBinder = null

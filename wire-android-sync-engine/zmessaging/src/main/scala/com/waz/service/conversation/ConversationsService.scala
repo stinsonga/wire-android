@@ -36,7 +36,7 @@ import com.waz.sync.client.{ConversationsClient, ErrorOr}
 import com.waz.sync.{SyncRequestService, SyncServiceHandle}
 import com.waz.threading.Threading
 import com.waz.utils._
-import com.waz.utils.events.{AggregatingSignal, EventContext, Signal}
+import com.wire.signals.{AggregatingSignal, EventContext, Signal}
 
 import scala.collection.{breakOut, mutable}
 import scala.concurrent.Future
@@ -221,12 +221,15 @@ class ConversationsServiceImpl(teamId:          Option[TeamId],
       } yield ()
 
     case MemberLeaveEvent(_, time, from, userIds) =>
+      val userIdSet = userIds.toSet
       for {
-        _              <- deleteMembers(conv.id, userIds.toSet, Some(from), sendSystemMessage = true)
-        selfUserLeaves =  userIds.contains(selfUserId)
+        syncId         <- users.syncIfNeeded(userIdSet -- Set(selfUserId))
+        _              <- syncId.fold(Future.successful(()))(sId => syncReqService.await(sId).map(_ => ()))
+        _              <- deleteMembers(conv.id, userIdSet, Some(from), sendSystemMessage = true)
+        selfUserLeaves =  userIdSet.contains(selfUserId)
         _              <- if (selfUserLeaves) content.setConvActive(conv.id, active = false) else Future.successful(())
                           // if the user removed themselves from another device, archived on this device
-        _              <- if (selfUserLeaves && from.equals(selfUserId))
+        _              <- if (selfUserLeaves && from == selfUserId)
                             content.updateConversationState(conv.id, ConversationState(Option(true), Option(time)))
                           else
                             Future.successful(None)
@@ -361,12 +364,12 @@ class ConversationsServiceImpl(teamId:          Option[TeamId],
       _             <- membersStorage.setAll(toUpdate)
       usersLeft     <- membersStorage.getByUsers(activeUsers.flatMap(_._2).toSet).map(_.map(_.userId).toSet)
       usersRemoved  =  activeUsers.map { case (cId, uIds) => cId -> (uIds -- usersLeft) }.filter(_._2.nonEmpty)
-      _             <- Future.sequence(usersRemoved.flatMap {
-                         case (cId, uIds) => uIds.map(uId => messages.addMemberLeaveMessage(cId, uId, uId))
-                       })
-      _             <- Future.sequence(usersRemoved.map {
+      _             <- Future.traverse(usersRemoved) {
+                         case (cId, uIds) => messages.addMemberLeaveMessage(cId, UserId(), uIds) // UserId() == unknown remover
+                       }
+      _             <- Future.traverse(usersRemoved) {
                          case (cId, _) => renameConversationIfNeeded(cId, activeUsers(cId))
-                       })
+                       }
       usersToDelete =  usersRemoved.flatMap(_._2).toSet
       _             <- if (usersToDelete.nonEmpty) usersStorage.updateAll2(usersToDelete, _.copy(deleted = true))
                        else Future.successful(())
@@ -392,7 +395,7 @@ class ConversationsServiceImpl(teamId:          Option[TeamId],
       _              <- renameConversationIfNeeded(convId, toRemove)
       isGroup        <- if (sendSystemMessage) isGroupConversation(convId) else Future.successful(false)
       _              <- if (isGroup)
-                          Future.sequence(toRemove.map(uId => messages.addMemberLeaveMessage(convId, remover.getOrElse(uId), uId)))
+                          messages.addMemberLeaveMessage(convId, remover.getOrElse(UserId()), toRemove) // UserId() == unknown remover
                         else
                           Future.successful(())
       stillInTeam    <- membersStorage.getByUsers(toRemove).map(_.map(_.userId).toSet)

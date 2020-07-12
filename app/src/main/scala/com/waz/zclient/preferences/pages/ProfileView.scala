@@ -26,13 +26,13 @@ import android.view.View.OnClickListener
 import android.widget.{ImageView, LinearLayout}
 import com.bumptech.glide.request.RequestOptions
 import com.waz.content.UserPreferences
-import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.otr.Client
-import com.waz.model.{AccentColor, Availability, Picture, UserPermissions}
+import com.waz.model.{AccentColor, Availability, Picture, TeamData, UserPermissions}
+import com.waz.service.teams.TeamsService
 import com.waz.service.tracking.TrackingService
 import com.waz.service.{AccountsService, ZMessaging}
 import com.waz.threading.Threading
-import com.waz.utils.events.{EventContext, EventStream, Signal}
+import com.wire.signals.{EventContext, EventStream, Signal}
 import com.waz.zclient.BuildConfig.ACCOUNT_CREATION_ENABLED
 import com.waz.zclient._
 import com.waz.zclient.appentry.AppEntryActivity
@@ -48,6 +48,7 @@ import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.Time.TimeStamp
 import com.waz.zclient.utils.{BackStackKey, BackStackNavigator, RichView, StringUtils, UiStorage, UserSignal}
 import com.waz.zclient.views.AvailabilityView
+import com.waz.threading.Threading._
 
 trait ProfileView {
   val onDevicesDialogAccept: EventStream[Unit]
@@ -136,13 +137,9 @@ class ProfileViewImpl(context: Context, attrs: AttributeSet, style: Int) extends
 
   override def setAccentColor(color: Int): Unit = {}
 
-  override def setTeamName(name: Option[String]) = {
-    name match {
-      case Some(teamName) =>
-        teamNameText.setText(context.getString(R.string.preferences_profile_in_team, teamName))
-      case None =>
-        teamNameText.setText("")
-    }
+  override def setTeamName(name: Option[String]): Unit = name match {
+    case Some(teamName) => teamNameText.setText(context.getString(R.string.preferences_profile_in_team, teamName))
+    case None           => teamNameText.setText("")
   }
 
   override def setManageTeamEnabled(enabled: Boolean): Unit = {
@@ -240,7 +237,7 @@ case class ProfileBackStackKey(args: Bundle = new Bundle()) extends BackStackKey
 }
 
 class ProfileViewController(view: ProfileView)(implicit inj: Injector, ec: EventContext)
-  extends Injectable with DerivedLogTag {
+  extends Injectable {
 
   import ProfileViewController._
 
@@ -260,7 +257,11 @@ class ProfileViewController(view: ProfileView)(implicit inj: Injector, ec: Event
     self   <- UserSignal(userId)
   } yield self
 
-  val team = zms.flatMap(_.teams.selfTeam)
+  lazy val team: Signal[Option[TeamData]] = {
+    val teams = inject[Signal[TeamsService]]
+    teams.head.foreach(_.syncTeamData())(Threading.Background)
+    teams.flatMap(_.selfTeam)
+  }
 
   self.map(_.picture).collect { case Some(pic) => pic }.onUi { view.setProfilePicture }
 
@@ -280,6 +281,7 @@ class ProfileViewController(view: ProfileView)(implicit inj: Injector, ec: Event
     userId    <- currentUser
     av <- usersController.availability(userId)
   } yield av
+
 
   usersController.availabilityVisible.zip(self.map(_.availability)).on(Threading.Ui) {
     case (visible, availability) => view.setAvailability(visible, availability)

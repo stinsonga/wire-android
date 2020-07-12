@@ -28,8 +28,9 @@ import com.waz.log.BasicLogging.LogTag.DerivedLogTag
 import com.waz.model.Picture
 import com.waz.service.call.Avs.VideoState
 import com.waz.service.call.CallInfo.Participant
-import com.waz.threading.{SerialDispatchQueue, Threading}
-import com.waz.utils.events.Signal
+import com.wire.signals.SerialDispatchQueue
+import com.waz.threading.Threading
+import com.wire.signals.Signal
 import com.waz.utils.returning
 import com.waz.zclient.calling.controllers.CallController
 import com.waz.zclient.common.controllers.{ThemeController, ThemeControllingFrameLayout}
@@ -39,6 +40,7 @@ import com.waz.zclient.paintcode.{GenericStyleKitView, WireStyleKit}
 import com.waz.zclient.utils.ContextUtils._
 import com.waz.zclient.utils.RichView
 import com.waz.zclient.{FragmentHelper, R, ViewHelper}
+import com.waz.threading.Threading._
 
 abstract class UserVideoView(context: Context, val participant: Participant) extends FrameLayout(context, null, 0) with ViewHelper {
   protected lazy val controller: CallController = inject[CallController]
@@ -199,9 +201,13 @@ class CallingFragment extends FragmentHelper {
             case 0                                             => (0, 0, 1)
             case 1 if !isVideoBeingSent && gridViews.size == 2 => (1, 0, 2)
             case 1                                             => (0, 1, 1)
-            case 2 if gridViews.size == 3                      => (1, 0, 2)
-            case 2                                             => (1, 0, 1)
-            case 3                                             => (1, 1, 1)
+            // The max number of columns is 2 and the max number of rows is undefined
+            // if the index of the video preview is odd, display it in row n/2, column 1 , span 1
+            case n if n % 2 != 0                               => (n / 2, 1, 1)
+            // else if the gridViews size is n+1 , display it in row n/2, column 0 , span 2
+            case n if gridViews.size == n + 1                  => (n / 2, 0, 2)
+            // else display it in row n/2, column 0 , span 1
+            case n                                             => (n / 2, 0, 1)
           }
           r.setLayoutParams(returning(new GridLayout.LayoutParams()) { params =>
             params.width      = 0

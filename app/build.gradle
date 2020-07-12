@@ -14,7 +14,7 @@ ext {
     avsGroup = 'com.wire'
 
     // proprietary avs artifact configuration
-    customAvsVersion = '5.6.15@aar'
+    customAvsVersion = '6.1.9@aar'
     customAvsInternalVersion = customAvsVersion
     customAvsName = 'avs'
     customAvsGroup = 'com.wearezeta.avs'
@@ -137,11 +137,16 @@ android {
         buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED',    "$buildtimeConfiguration.configuration.developer_features_enabled"
         buildConfigField 'boolean', 'LOGGING_ENABLED',               "$buildtimeConfiguration.configuration.logging_enabled"
         buildConfigField 'boolean', 'SAFE_LOGGING',                  "$buildtimeConfiguration.configuration.safe_logging"
+        buildConfigField 'boolean', 'FILE_RESTRICTION_ENABLED',      "$buildtimeConfiguration.configuration.file_restriction_enabled"
+        buildConfigField 'String',  'FILE_RESTRICTION_LIST',         "\"$buildtimeConfiguration.configuration.file_restriction_list\""
 
         //Kotlin Feature Flags
         buildConfigField 'boolean', 'KOTLIN_SETTINGS', "$rootProject.ext.kotlinSettings"
         buildConfigField 'boolean', 'KOTLIN_REGISTRATION', "$rootProject.ext.kotlinRegistration"
         buildConfigField 'boolean', 'KOTLIN_CORE', "$rootProject.ext.kotlinCore"
+
+        // Internal feature flags to override in productFlavors
+        buildConfigField 'boolean', 'CONFERENCE_CALLING', 'false'
     }
 
     packagingOptions {
@@ -222,8 +227,9 @@ android {
                                     applicationIcon        : "@mipmap/ic_launcher_wire_dev",
                                     sharedUserId           : ""]
             buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED', 'true'
-            buildConfigField 'boolean', 'LOGGING_ENABLED',        'true'
-            buildConfigField 'boolean', 'SAFE_LOGGING',     'false'
+            buildConfigField 'boolean', 'LOGGING_ENABLED', 'true'
+            buildConfigField 'boolean', 'SAFE_LOGGING', 'false'
+            buildConfigField 'boolean', 'CONFERENCE_CALLING', 'true'
         }
 
         candidate {
@@ -234,8 +240,8 @@ android {
                                     sharedUserId           : ""]
 
             buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED', 'true'
-            buildConfigField 'boolean', 'LOGGING_ENABLED',        "$buildtimeConfiguration.configuration.loggingEnabled"
-            buildConfigField 'boolean', 'SAFE_LOGGING',     'true'
+            buildConfigField 'boolean', 'LOGGING_ENABLED', "$buildtimeConfiguration.configuration.loggingEnabled"
+            buildConfigField 'boolean', 'SAFE_LOGGING', 'true'
         }
 
         prod {
@@ -245,8 +251,8 @@ android {
                                     sharedUserId           : buildtimeConfiguration.configuration.userId]
 
             buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED', 'false'
-            buildConfigField 'boolean', 'LOGGING_ENABLED',        "$buildtimeConfiguration.configuration.loggingEnabled"
-            buildConfigField 'boolean', 'SAFE_LOGGING',     'true'
+            buildConfigField 'boolean', 'LOGGING_ENABLED', "$buildtimeConfiguration.configuration.loggingEnabled"
+            buildConfigField 'boolean', 'SAFE_LOGGING', 'true'
         }
 
         internal {
@@ -256,9 +262,10 @@ android {
                                     applicationIcon  : "@mipmap/ic_launcher_wire_internal",
                                     sharedUserId     : ""]
 
-            buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED',    'true'
-            buildConfigField 'boolean', 'LOGGING_ENABLED',        'true'
-            buildConfigField 'boolean', 'SAFE_LOGGING',     'true'
+            buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED', 'true'
+            buildConfigField 'boolean', 'LOGGING_ENABLED', 'true'
+            buildConfigField 'boolean', 'SAFE_LOGGING', 'true'
+            buildConfigField 'boolean', 'CONFERENCE_CALLING', 'true'
         }
 
         experimental {
@@ -269,8 +276,9 @@ android {
                                     sharedUserId           : ""]
 
             buildConfigField 'boolean', 'DEVELOPER_FEATURES_ENABLED', 'true'
-            buildConfigField 'boolean', 'LOGGING_ENABLED',        'true'
-            buildConfigField 'boolean', 'SAFE_LOGGING',     'true'
+            buildConfigField 'boolean', 'LOGGING_ENABLED', 'true'
+            buildConfigField 'boolean', 'SAFE_LOGGING', 'true'
+            buildConfigField 'boolean', 'CONFERENCE_CALLING', 'true'
         }
     }
 
@@ -332,6 +340,7 @@ dependencies {
     implementation LegacyDependencies.scalaLibrary
     implementation LegacyDependencies.scalaReflect
     implementation LegacyDependencies.scalaShapeless
+
 
     implementation BuildDependencies.kotlin.standardLibrary
     implementation BuildDependencies.kotlin.coroutinesCore
@@ -423,6 +432,8 @@ dependencies {
     implementation BuildDependencies.commonMark
     implementation BuildDependencies.jna
     implementation BuildDependencies.pinEditText
+
+    implementation BuildDependencies.wireSignals
 
     // Unit Tests
     testImplementation TestDependencies.jUnit
