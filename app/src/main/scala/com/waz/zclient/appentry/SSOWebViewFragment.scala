@@ -24,20 +24,19 @@ import android.view.{LayoutInflater, View, ViewGroup}
 import android.webkit.WebView
 import android.widget.TextView
 import androidx.appcompat.widget.Toolbar
-import androidx.fragment.app.FragmentManager
 import com.waz.service.{AccountsService, ZMessaging}
 import com.waz.threading.Threading
+import com.waz.threading.Threading._
 import com.waz.utils._
 import com.waz.utils.wrappers.URI
 import com.waz.zclient.appentry.DialogErrorMessage.EmailError
 import com.waz.zclient.appentry.SSOWebViewWrapper.SSOResponse
 import com.waz.zclient.appentry.fragments.FirstLaunchAfterLoginFragment
 import com.waz.zclient.common.controllers.UserAccountsController
-import com.waz.zclient.utils.{ContextUtils, ViewUtils}
+import com.waz.zclient.utils.{ ContextUtils, ViewUtils}
 import com.waz.zclient.{FragmentHelper, R}
 
 import scala.concurrent.Future
-import com.waz.threading.Threading._
 
 class SSOWebViewFragment extends FragmentHelper {
   import Threading.Implicits.Ui
@@ -87,7 +86,7 @@ class SSOWebViewFragment extends FragmentHelper {
   }
 
   override def onBackPressed(): Boolean = {
-    getFragmentManager.popBackStack(SSOWebViewFragment.Tag, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+    activity.showWelcomeScreen()
     inject[UserAccountsController].ssoToken ! None
     true
   }
@@ -123,7 +122,6 @@ class SSOWebViewFragment extends FragmentHelper {
   }
 
   def activity = getActivity.asInstanceOf[AppEntryActivity]
-
 }
 
 object SSOWebViewFragment {

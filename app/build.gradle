@@ -15,7 +15,11 @@ ext {
 
     // proprietary avs artifact configuration
     customAvsVersion = '6.1.9@aar'
+<<<<<<< HEAD
     customAvsInternalVersion = customAvsVersion
+=======
+    customAvsInternalVersion = '6.0.43@aar'
+>>>>>>> 1036a1331a3507bd0646080a54853117bca9d872
     customAvsName = 'avs'
     customAvsGroup = 'com.wearezeta.avs'
 }
